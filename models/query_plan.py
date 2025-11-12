@@ -36,9 +36,10 @@ class QueryPlan(ABC):
 
 class TableScanNode(QueryPlan):
     
-    def __init__(self, table_name: str):
+    def __init__(self, table_name: str, alias: Optional[str] = None):
         super().__init__()
         self.table_name = table_name
+        self.alias = alias
     
     def accept(self, visitor: 'QueryPlanVisitor') -> Any:
         return visitor.visit_table_scan(self)
@@ -54,15 +55,18 @@ class TableScanNode(QueryPlan):
         return result
     
     def __repr__(self) -> str:
-        return f"TableScanNode(table={self.table_name})"
+        if self.alias:
+            return f"TableScan(table={self.table_name} AS {self.alias})"
+        return f"TableScan(table={self.table_name})"
 
 
 class FilterNode(QueryPlan):
     
-    def __init__(self, child: QueryPlan, condition: WhereCondition):
+    def __init__(self, child: QueryPlan, condition: WhereCondition, alias: Optional[str] = None):
         super().__init__()
         self.child = child
         self.condition = condition
+        self.alias = alias
     
     def accept(self, visitor: 'QueryPlanVisitor') -> Any:
         return visitor.visit_filter(self)
@@ -72,7 +76,8 @@ class FilterNode(QueryPlan):
     
     def _print_tree_recursive(self, indent: int, prefix: str, is_last: bool) -> str:
         connector = "└── " if is_last else "├── "
-        result = f"{prefix}{connector}Filter: {self.condition}\n"
+        alias_str = f" AS {self.alias}" if self.alias else ""
+        result = f"{prefix}{connector}Filter: {self.condition}{alias_str}\n"
         cost_str = f"{self.cost:.1f}" if self.cost is not None else "N/A"
         result += f"{prefix}{'    ' if is_last else '│   '}  [Cost: {cost_str}]\n"
         
@@ -82,15 +87,17 @@ class FilterNode(QueryPlan):
         return result
     
     def __repr__(self) -> str:
-        return f"FilterNode(condition={self.condition})"
+        alias_str = f" AS {self.alias}" if self.alias else ""
+        return f"FilterNode(condition={self.condition}{alias_str})"
 
 
 class ProjectNode(QueryPlan):
     
-    def __init__(self, child: QueryPlan, columns: List[str]):
+    def __init__(self, child: QueryPlan, columns: List[str], alias: Optional[str] = None):
         super().__init__()
         self.child = child
         self.columns = columns
+        self.alias = alias
     
     def accept(self, visitor: 'QueryPlanVisitor') -> Any:
         return visitor.visit_project(self)
@@ -103,7 +110,8 @@ class ProjectNode(QueryPlan):
         columns_str = ", ".join(self.columns[:3])  # Show first 3 columns
         if len(self.columns) > 3:
             columns_str += f", ... ({len(self.columns)} total)"
-        result = f"{prefix}{connector}Project: [{columns_str}]\n"
+        alias_str = f" AS {self.alias}" if self.alias else ""
+        result = f"{prefix}{connector}Project: [{columns_str}]{alias_str}\n"
         cost_str = f"{self.cost:.1f}" if self.cost is not None else "N/A"
         result += f"{prefix}{'    ' if is_last else '│   '}  [Cost: {cost_str}]\n"
         
@@ -113,7 +121,8 @@ class ProjectNode(QueryPlan):
         return result
     
     def __repr__(self) -> str:
-        return f"ProjectNode(columns={self.columns})"
+        alias_str = f" AS {self.alias}" if self.alias else ""
+        return f"ProjectNode(columns={self.columns}{alias_str})"
 
 
 class SortNode(QueryPlan):
@@ -122,12 +131,14 @@ class SortNode(QueryPlan):
         self,
         child: QueryPlan,
         order_by: List[OrderByClause],
-        limit: Optional[int] = None
+        limit: Optional[int] = None,
+        alias: Optional[str] = None
     ):
         super().__init__()
         self.child = child
         self.order_by = order_by
         self.limit = limit
+        self.alias = alias
     
     def accept(self, visitor: 'QueryPlanVisitor') -> Any:
         return visitor.visit_sort(self)
@@ -141,7 +152,8 @@ class SortNode(QueryPlan):
         if len(self.order_by) > 2:
             order_str += f", ... ({len(self.order_by)} columns)"
         limit_str = f" LIMIT {self.limit}" if self.limit else ""
-        result = f"{prefix}{connector}Sort: [{order_str}]{limit_str}\n"
+        alias_str = f" AS {self.alias}" if self.alias else ""
+        result = f"{prefix}{connector}Sort: [{order_str}]{limit_str}{alias_str}\n"
         cost_str = f"{self.cost:.1f}" if self.cost is not None else "N/A"
         result += f"{prefix}{'    ' if is_last else '│   '}  [Cost: {cost_str}]\n"
         
@@ -151,7 +163,8 @@ class SortNode(QueryPlan):
         return result
     
     def __repr__(self) -> str:
-        return f"SortNode(order_by={self.order_by}, limit={self.limit})"
+        alias_str = f" AS {self.alias}" if self.alias else ""
+        return f"SortNode(order_by={self.order_by}, limit={self.limit}{alias_str})"
 
 
 class NestedLoopJoinNode(QueryPlan):
@@ -160,12 +173,14 @@ class NestedLoopJoinNode(QueryPlan):
         self,
         left_child: QueryPlan,
         right_child: QueryPlan,
-        join_condition: JoinCondition
+        join_condition: JoinCondition,
+        alias: Optional[str] = None
     ):
         super().__init__()
         self.left_child = left_child
         self.right_child = right_child
         self.join_condition = join_condition
+        self.alias = alias
     
     def accept(self, visitor: 'QueryPlanVisitor') -> Any:
         return visitor.visit_join(self)
@@ -175,7 +190,8 @@ class NestedLoopJoinNode(QueryPlan):
     
     def _print_tree_recursive(self, indent: int, prefix: str, is_last: bool) -> str:
         connector = "└── " if is_last else "├── "
-        result = f"{prefix}{connector}NestedLoopJoin: {self.join_condition.join_type}\n"
+        alias_str = f" AS {self.alias}" if self.alias else ""
+        result = f"{prefix}{connector}NestedLoopJoin: {self.join_condition.join_type}{alias_str}\n"
         cost_str = f"{self.cost:.1f}" if self.cost is not None else "N/A"
         result += f"{prefix}{'    ' if is_last else '│   '}  [Cost: {cost_str}]\n"
         result += f"{prefix}{'    ' if is_last else '│   '}  [Condition: {self.join_condition.condition}]\n"
@@ -192,7 +208,8 @@ class NestedLoopJoinNode(QueryPlan):
         return result
     
     def __repr__(self) -> str:
-        return f"NestedLoopJoinNode(condition={self.join_condition})"
+        alias_str = f" AS {self.alias}" if self.alias else ""
+        return f"NestedLoopJoinNode(condition={self.join_condition}{alias_str})"
 
 
 

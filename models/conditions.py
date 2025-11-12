@@ -78,7 +78,13 @@ class WhereCondition:
             return False
         
         left_val = row_data[self.column]
-        right_val = self.value
+        
+        if isinstance(self.value, ColumnReference):
+            if self.value.column_name not in row_data:
+                return False
+            right_val = row_data[self.value.column_name]
+        else:
+            right_val = self.value
         
         if self.operator == ComparisonOperator.EQUALS:
             return left_val == right_val
@@ -109,6 +115,12 @@ class WhereCondition:
         else:
             return False
 
+class ColumnReference:
+    def __init__(self, column_name: str):
+        self.column_name = column_name
+    
+    def __repr__(self):
+        return f"REF({self.column_name})"
 
 class LogicalCondition:
     

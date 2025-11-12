@@ -13,7 +13,8 @@ from .conditions import (
     LogicalCondition,
     OrderByClause,
     GroupByClause,
-    JoinCondition
+    JoinCondition,
+    ColumnReference
 )
 from .query_plan import (
     QueryPlan,
@@ -40,6 +41,7 @@ __all__ = [
     'OrderByClause',
     'GroupByClause',
     'JoinCondition',
+    'ColumnReference',
     'QueryPlan',
     'TableScanNode',
     'FilterNode',
