@@ -38,6 +38,9 @@ class QueryProcessor:
     def get_recovery_manager(self) -> AbstractFailureRecoveryManager:
         return self.recovery_manager
     
+    def get_executor(self) -> QueryExecutor:
+        return self.executor
+    
     def execute_query(
         self, 
         query: str, 

@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 from .plan_visitor import QueryPlanVisitor
 from ..models import (
     Rows,
@@ -19,36 +19,31 @@ from ..interfaces import AbstractStorageManager, AbstractConcurrencyControlManag
 
 
 class ExecutionVisitor(QueryPlanVisitor):
-    
     def __init__(
         self,
         storage_manager: AbstractStorageManager,
-        concurrency_manager: AbstractConcurrencyControlManager,
-        transaction_id: str
+        concurrency_manager: Optional[AbstractConcurrencyControlManager] = None,
+        current_transaction: Optional[int] = None
     ):
         self.storage_manager = storage_manager
         self.concurrency_manager = concurrency_manager
-        self.transaction_id = transaction_id
+        self.current_transaction = current_transaction
     
     def visit_table_scan(self, node: TableScanNode) -> Rows:
-        # Request lock READ pada tabel
         lock_granted = self.concurrency_manager.request_lock(
             self.transaction_id,
-            node.table_name,
+            f"{node.table_name}:0",
             "READ"
         )
         
         if not lock_granted:
             raise RuntimeError(f"Failed to acquire READ lock on table: {node.table_name}")
         
-        # Baca tabel dari storage
         return self.storage_manager.read_table(node.table_name)
     
     def visit_filter(self, node: FilterNode) -> Rows:
-        # Eksekusi child node secara rekursif
         child_rows = node.child.accept(self)
         
-        # Filter setiap row berdasarkan condition
         filtered_data = []
         for row in child_rows.data:
             row_dict = {col: val for col, val in zip(child_rows.columns, row)}
@@ -59,20 +54,16 @@ class ExecutionVisitor(QueryPlanVisitor):
         return Rows(child_rows.columns, filtered_data)
     
     def visit_project(self, node: ProjectNode) -> Rows:
-        # Eksekusi child node secara rekursif
         child_rows = node.child.accept(self)
         
-        # Handle SELECT *
         if '*' in node.columns:
             return child_rows
         
-        # Cari indeks kolom untuk proyeksi
         try:
             column_indices = [child_rows.columns.index(col) for col in node.columns]
         except ValueError as e:
             raise ValueError(f"Column not found during projection: {e}")
         
-        # Proyeksi data - ambil kolom yang diminta saja
         projected_data = []
         for row in child_rows.data:
             projected_row = [row[idx] for idx in column_indices]
@@ -81,16 +72,13 @@ class ExecutionVisitor(QueryPlanVisitor):
         return Rows(node.columns, projected_data)
     
     def visit_sort(self, node: SortNode) -> Rows:
-        # Eksekusi child node secara rekursif
         child_rows = node.child.accept(self)
         
         if not node.order_by:
-            # Tidak ada sorting, hanya apply limit jika ada
             if node.limit:
                 return Rows(child_rows.columns, child_rows.data[:node.limit])
             return child_rows
         
-        # Cari indeks kolom untuk ORDER BY
         sort_indices = []
         for clause in node.order_by:
             try:
@@ -99,7 +87,6 @@ class ExecutionVisitor(QueryPlanVisitor):
             except ValueError:
                 raise ValueError(f"ORDER BY column not found: {clause.column}")
         
-        # Fungsi untuk generate sort key
         def sort_key(row):
             keys = []
             for idx, direction in sort_indices:
@@ -107,7 +94,6 @@ class ExecutionVisitor(QueryPlanVisitor):
                 if value is None:
                     value = ""
                 
-                # Untuk DESC, negate nilai numerik atau reverse string
                 if direction == "DESC":
                     if isinstance(value, (int, float)):
                         keys.append(-value)
@@ -120,58 +106,50 @@ class ExecutionVisitor(QueryPlanVisitor):
                         keys.append(value)
             return tuple(keys)
         
-        # Sort data
         sorted_data = sorted(child_rows.data, key=sort_key)
         
-        # Apply LIMIT jika ada
         if node.limit:
             sorted_data = sorted_data[:node.limit]
         
         return Rows(child_rows.columns, sorted_data)
     
     def visit_join(self, node: NestedLoopJoinNode) -> Rows:
-        # Eksekusi kedua child node secara rekursif
         left_rows = node.left_child.accept(self)
         right_rows = node.right_child.accept(self)
         
-        # Gabungkan kolom dari kedua sisi
         result_columns = left_rows.columns + right_rows.columns
         result_data = []
         
-        # Algoritma nested loop join
         for left_row in left_rows.data:
             for right_row in right_rows.data:
-                # Buat row dict gabungan untuk evaluasi condition
                 combined_dict = {}
                 for col, val in zip(left_rows.columns, left_row):
                     combined_dict[col] = val
                 for col, val in zip(right_rows.columns, right_row):
                     combined_dict[col] = val
                 
-                # Evaluasi join condition
                 if node.join_condition.condition.evaluate(combined_dict):
                     combined_row = list(left_row) + list(right_row)
                     result_data.append(combined_row)
         
         return Rows(result_columns, result_data)
     
-    # Operasi DML
     
     def visit_insert(self, plan: InsertPlan) -> ExecutionResult:
         start_time = datetime.now()
         
         try:
-            # Request lock WRITE
-            self.concurrency_manager.request_lock(
+            lock_granted = self.concurrency_manager.request_lock(
                 self.transaction_id,
-                plan.table_name,
+                f"{plan.table_name}:0", 
                 "WRITE"
             )
             
-            # Buat Rows object dari plan data
+            if not lock_granted:
+                raise RuntimeError(f"Failed to acquire WRITE lock on table: {plan.table_name}")
+            
             rows = Rows(columns=plan.columns, data=[plan.values])
             
-            # Eksekusi insert via storage manager
             inserted_rows = self.storage_manager.insert_rows(
                 plan.table_name,
                 rows,
@@ -202,17 +180,17 @@ class ExecutionVisitor(QueryPlanVisitor):
         start_time = datetime.now()
         
         try:
-            # Request lock WRITE
-            self.concurrency_manager.request_lock(
+            lock_granted = self.concurrency_manager.request_lock(
                 self.transaction_id,
-                plan.table_name,
+                f"{plan.table_name}:0", 
                 "WRITE"
             )
             
-            # Konversi WhereCondition ke dict untuk storage manager
+            if not lock_granted:
+                raise RuntimeError(f"Failed to acquire WRITE lock on table: {plan.table_name}")
+            
             condition_dict = self._convert_where_to_dict(plan.where) if plan.where else None
             
-            # Eksekusi update via storage manager
             affected_rows = self.storage_manager.update_rows(
                 plan.table_name,
                 plan.set_clause,
@@ -244,20 +222,20 @@ class ExecutionVisitor(QueryPlanVisitor):
         start_time = datetime.now()
         
         try:
-            # Request lock WRITE
-            self.concurrency_manager.request_lock(
+            lock_granted = self.concurrency_manager.request_lock(
                 self.transaction_id,
-                plan.table_name,
+                f"{plan.table_name}:0", 
                 "WRITE"
             )
             
-            # Konversi WhereCondition ke dict untuk storage manager
+            if not lock_granted:
+                raise RuntimeError(f"Failed to acquire WRITE lock on table: {plan.table_name}")
+            
             if plan.where:
                 condition_dict = self._convert_where_to_dict(plan.where)
             else:
                 condition_dict = None
             
-            # Eksekusi delete via storage manager
             deleted_rows = self.storage_manager.delete_rows(
                 plan.table_name,
                 condition_dict
@@ -290,7 +268,6 @@ class ExecutionVisitor(QueryPlanVisitor):
         start_time = datetime.now()
         
         try:
-            # Eksekusi create table via storage manager
             success = self.storage_manager.create_table(
                 plan.table_name,
                 plan.schema
@@ -327,7 +304,6 @@ class ExecutionVisitor(QueryPlanVisitor):
         start_time = datetime.now()
         
         try:
-            # Eksekusi drop table via storage manager
             success = self.storage_manager.drop_table(plan.table_name)
             
             execution_time = (datetime.now() - start_time).total_seconds()
