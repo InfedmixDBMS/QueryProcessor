@@ -5,8 +5,11 @@ from typing import Optional, List
 
 class Transaction:
     
-    def __init__(self, transaction_id: Optional[str] = None):
-        self.transaction_id = transaction_id or str(uuid.uuid4())
+    counter = 0
+    
+    def __init__(self, transaction_id: Optional[int] = None):
+        self.transaction_id = transaction_id or Transaction.counter
+        Transaction.counter += 1
         self.start_time = datetime.now()
         self.status = "ACTIVE"
         self.queries_executed: List[str] = []

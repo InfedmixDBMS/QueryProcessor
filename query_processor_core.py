@@ -25,6 +25,18 @@ class QueryProcessor:
         self.recovery_manager = recovery_manager
         self.executor = QueryExecutor(storage_manager, concurrency_manager)
         self.active_transactions: Dict[str, Transaction] = {}
+        
+    def get_optimizer(self) -> AbstractQueryOptimizer:
+        return self.optimizer
+    
+    def get_storage_manager(self) -> AbstractStorageManager:
+        return self.storage_manager
+    
+    def get_concurrency_manager(self) -> AbstractConcurrencyControlManager:
+        return self.concurrency_manager
+    
+    def get_recovery_manager(self) -> AbstractFailureRecoveryManager:
+        return self.recovery_manager
     
     def execute_query(
         self, 
