@@ -34,7 +34,7 @@ class QueryExecutor:
             return ExecutionResult(
                 success=True,
                 data=result_rows,
-                rows_affected=len(result_rows.data) if result_rows else 0,
+                affected_rows=len(result_rows.data) if result_rows else 0,
                 message="Query executed successfully"
             )
         except Exception as e:

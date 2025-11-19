@@ -8,7 +8,7 @@ class ExecutionResult:
     def __init__(
         self,
         success: bool,
-        rows: Optional[Rows] = None,
+        data: Optional[Rows] = None,
         affected_rows: int = 0,
         message: str = "",
         error: Optional[str] = None,
@@ -16,15 +16,17 @@ class ExecutionResult:
         transaction_id: Optional[str] = None,
         query: Optional[str] = None
     ):
-        self.success = success
-        self.rows = rows
-        self.affected_rows = affected_rows
-        self.message = message
-        self.error = error
-        self.execution_time = execution_time
         self.transaction_id = transaction_id
-        self.query = query
         self.timestamp = datetime.now()
+        self.message = message
+        self.data = data
+        self.query = query
+        self.affected_rows = affected_rows
+
+        # Atribut Tambahan
+        self.error = error
+        self.success = success
+        self.execution_time = execution_time
     
     def __repr__(self) -> str:
         if self.success:
