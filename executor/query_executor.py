@@ -22,19 +22,24 @@ class QueryExecutor:
         self.failure_recovery = failure_recovery
         self.current_transaction: Optional[int] = None
     
-    def execute(self, plan: QueryPlan) -> ExecutionResult:
+    def execute(self, plan: QueryPlan, transaction: Optional[Transaction] = None) -> ExecutionResult:
+        transaction_id = transaction.transaction_id if transaction else None
         visitor = ExecutionVisitor(
             self.storage_manager,
             self.concurrency_manager,
-            self.current_transaction
+            transaction_id
         )
         
         try:
-            result_rows = plan.accept(visitor)
+            result = plan.accept(visitor)
+            
+            if isinstance(result, ExecutionResult):
+                return result
+            
             return ExecutionResult(
                 success=True,
-                data=result_rows,
-                rows_affected=len(result_rows.data) if result_rows else 0,
+                rows=result,
+                affected_rows=len(result.data) if result else 0,
                 message="Query executed successfully"
             )
         except Exception as e:

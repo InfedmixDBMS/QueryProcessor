@@ -30,14 +30,10 @@ class AbstractConcurrencyControlManager(ABC):
         resource_id: str, 
         lock_type: str
     ) -> bool:
-        pass
-    
-    @abstractmethod
-    def release_lock(self, transaction_id: int, resource_id: str) -> bool:
-        pass
-    
-    @abstractmethod
-    def release_all_locks(self, transaction_id: int) -> bool:
+        """
+        Ekuivalen dengan ccm.transaction_query().
+        Request akses ke resource (tabel).
+        """
         pass
     
     @abstractmethod

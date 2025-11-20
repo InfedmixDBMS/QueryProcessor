@@ -13,7 +13,7 @@ class ExecutionResult:
         message: str = "",
         error: Optional[str] = None,
         execution_time: float = 0.0,
-        transaction_id: Optional[str] = None,
+        transaction_id: Optional[int] = None,
         query: Optional[str] = None
     ):
         self.success = success
