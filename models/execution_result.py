@@ -8,25 +8,23 @@ class ExecutionResult:
     def __init__(
         self,
         success: bool,
-        data: Optional[Rows] = None,
+        rows: Optional[Rows] = None,
         affected_rows: int = 0,
         message: str = "",
         error: Optional[str] = None,
         execution_time: float = 0.0,
-        transaction_id: Optional[str] = None,
+        transaction_id: Optional[int] = None,
         query: Optional[str] = None
     ):
-        self.transaction_id = transaction_id
-        self.timestamp = datetime.now()
-        self.message = message
-        self.data = data
-        self.query = query
-        self.affected_rows = affected_rows
-
-        # Atribut Tambahan
-        self.error = error
         self.success = success
+        self.rows = rows
+        self.affected_rows = affected_rows
+        self.message = message
+        self.error = error
         self.execution_time = execution_time
+        self.transaction_id = transaction_id
+        self.query = query
+        self.timestamp = datetime.now()
     
     def __repr__(self) -> str:
         if self.success:

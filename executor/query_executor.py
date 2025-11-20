@@ -1,6 +1,17 @@
+import time
 from datetime import datetime
 from typing import Optional
-from ..models import QueryPlan, ExecutionResult, Transaction, TableScanNode
+from ..models import (
+    QueryPlan,
+    ExecutionResult,
+    Transaction,
+    TableScanNode,
+    InsertPlan,
+    UpdatePlan,
+    DeletePlan,
+    CreateTablePlan,
+    DropTablePlan
+)
 from ..interfaces import (
     AbstractStorageManager,
     AbstractConcurrencyControlManager,
@@ -22,19 +33,24 @@ class QueryExecutor:
         self.failure_recovery = failure_recovery
         self.current_transaction: Optional[int] = None
     
-    def execute(self, plan: QueryPlan) -> ExecutionResult:
+    def execute(self, plan: QueryPlan, transaction: Optional[Transaction] = None) -> ExecutionResult:
+        transaction_id = transaction.transaction_id if transaction else None
         visitor = ExecutionVisitor(
             self.storage_manager,
             self.concurrency_manager,
-            self.current_transaction
+            transaction_id
         )
         
         try:
-            result_rows = plan.accept(visitor)
+            result = plan.accept(visitor)
+            
+            if isinstance(result, ExecutionResult):
+                return result
+            
             return ExecutionResult(
                 success=True,
-                data=result_rows,
-                affected_rows=len(result_rows.data) if result_rows else 0,
+                rows=result,
+                affected_rows=len(result.data) if result else 0,
                 message="Query executed successfully"
             )
         except Exception as e:
@@ -53,10 +69,7 @@ class QueryExecutor:
                 self.current_transaction = transaction_id
                 print(f"Transaction {transaction_id} started")
             
-            if not self._acquire_locks(plan, "READ"):
-                raise Exception("Failed to acquire locks")
-            
-            result = self.execute(plan)
+            result = self.execute(plan, Transaction(transaction_id))
             
             if not result.success:
                 raise Exception(result.error)
@@ -89,31 +102,17 @@ class QueryExecutor:
             )
     
     def _acquire_locks(self, plan: QueryPlan, lock_type: str) -> bool:
-        if not self.concurrency_manager or not self.current_transaction:
-            return True
-                
-        tables = self._extract_tables(plan)
-        
-        for table in tables:
-            resource_id = f"{table}:0"  # Table-level lock
-            success = self.concurrency_manager.request_lock(
-                self.current_transaction,
-                resource_id,
-                lock_type
-            )
-            if not success:
-                print(f"Failed to acquire {lock_type} lock on {table}")
-                return False
-        
+        # Deprecated: Standard 2PL acquires locks in ExecutionVisitor
         return True
     
     def _extract_tables(self, plan: QueryPlan) -> list:
         
         tables = []
         
-        if isinstance(plan, TableScanNode):
+        if isinstance(plan, (TableScanNode, InsertPlan, UpdatePlan, DeletePlan, CreateTablePlan, DropTablePlan)):
             tables.append(plan.table_name)
         
+        # Recursive untuk child nodes
         if hasattr(plan, 'child') and plan.child:
             tables.extend(self._extract_tables(plan.child))
         if hasattr(plan, 'left_child') and plan.left_child:

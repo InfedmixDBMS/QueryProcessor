@@ -1,3 +1,4 @@
+import threading
 from datetime import datetime
 from typing import Dict, Optional
 from .models import ExecutionResult, Transaction
@@ -24,8 +25,15 @@ class QueryProcessor:
         self.concurrency_manager = concurrency_manager
         self.recovery_manager = recovery_manager
         self.executor = QueryExecutor(storage_manager, concurrency_manager)
-        self.active_transactions: Dict[str, Transaction] = {}
-        
+        self.active_transactions: Dict[int, Transaction] = {}
+        self._lock = threading.Lock()
+
+    def begin_transaction(self) -> int:
+        transaction_id = self.concurrency_manager.begin_transaction()
+        with self._lock:
+            self._get_or_create_transaction(transaction_id)
+        return transaction_id
+    
     def get_optimizer(self) -> AbstractQueryOptimizer:
         return self.optimizer
     
@@ -44,7 +52,7 @@ class QueryProcessor:
     def execute_query(
         self, 
         query: str, 
-        transaction_id: Optional[str] = None
+        transaction_id: Optional[int] = None
     ) -> ExecutionResult:
         start_time = datetime.now()
         
@@ -54,7 +62,8 @@ class QueryProcessor:
                 self.recovery_manager.log_query(transaction_id, query)
             
             # Get atau create transaction
-            transaction = self._get_or_create_transaction(transaction_id)
+            with self._lock:
+                transaction = self._get_or_create_transaction(transaction_id)
             transaction.add_query(query)
             
             # Kirim ke QueryOptimizer dan dapatkan QueryPlan tree
@@ -85,7 +94,7 @@ class QueryProcessor:
                 execution_time=self._calculate_execution_time(start_time)
             )
     
-    def _get_or_create_transaction(self, transaction_id: Optional[str]) -> Transaction:
+    def _get_or_create_transaction(self, transaction_id: Optional[int]) -> Transaction:
         if transaction_id and (transaction_id in self.active_transactions):
             return self.active_transactions[transaction_id]
         else:
@@ -116,64 +125,66 @@ class QueryProcessor:
     
     def _abort_transaction(self, transaction: Transaction) -> None:
         transaction.abort()
-        self.concurrency_manager.release_all_locks(transaction.transaction_id)
+        self.concurrency_manager.rollback_transaction(transaction.transaction_id)
         self.recovery_manager.log_transaction_abort(transaction.transaction_id)
     
-    def commit_transaction(self, transaction_id: str) -> ExecutionResult:
-        if transaction_id not in self.active_transactions:
-            return ExecutionResult(
-                success=False,
-                error=f"Transaction '{transaction_id}' not found"
-            )
-        
-        transaction = self.active_transactions[transaction_id]
-        
-        try:
-            transaction.commit()
+    def commit_transaction(self, transaction_id: int) -> ExecutionResult:
+        with self._lock:
+            if transaction_id not in self.active_transactions:
+                return ExecutionResult(
+                    success=False,
+                    error=f"Transaction '{transaction_id}' not found"
+                )
             
-            # Release semua lock
-            self.concurrency_manager.release_all_locks(transaction_id)
+            transaction = self.active_transactions[transaction_id]
             
-            # Log commit
-            self.recovery_manager.log_transaction_commit(transaction_id)
-            
-            # Hapus dari active transactions
-            del self.active_transactions[transaction_id]
-            
-            return ExecutionResult(
-                success=True,
-                message=f"Transaction '{transaction_id}' committed successfully"
-            )
-            
-        except Exception as e:
-            return ExecutionResult(
-                success=False,
-                error=f"Failed to commit transaction: {str(e)}"
-            )
+            try:
+                transaction.commit()
+                
+                # Commit di Concurrency Manager
+                self.concurrency_manager.commit_transaction(transaction_id)
+                
+                # Log commit
+                self.recovery_manager.log_transaction_commit(transaction_id)
+                
+                # Hapus dari active transactions
+                del self.active_transactions[transaction_id]
+                
+                return ExecutionResult(
+                    success=True,
+                    message=f"Transaction '{transaction_id}' committed successfully"
+                )
+                
+            except Exception as e:
+                return ExecutionResult(
+                    success=False,
+                    error=f"Failed to commit transaction: {str(e)}"
+                )
     
-    def rollback_transaction(self, transaction_id: str) -> ExecutionResult:
-        if transaction_id not in self.active_transactions:
-            return ExecutionResult(
-                success=False,
-                error=f"Transaction '{transaction_id}' not found"
-            )
-        
-        transaction = self.active_transactions[transaction_id]
-        
-        try:
-            # Abort transaction
-            self._abort_transaction(transaction)
+    def rollback_transaction(self, transaction_id: int) -> ExecutionResult:
+        with self._lock:
+            if transaction_id not in self.active_transactions:
+                return ExecutionResult(
+                    success=False,
+                    error=f"Transaction '{transaction_id}' not found"
+                )
             
-            # Hapus dari active transactions
-            del self.active_transactions[transaction_id]
+            transaction = self.active_transactions[transaction_id]
             
-            return ExecutionResult(
-                success=True,
-                message=f"Transaction '{transaction_id}' rolled back successfully"
-            )
-            
-        except Exception as e:
-            return ExecutionResult(
-                success=False,
-                error=f"Failed to rollback transaction: {str(e)}"
-            )
+            try:
+                # Abort transaction
+                self._abort_transaction(transaction)
+                
+                # Hapus dari active transactions
+                del self.active_transactions[transaction_id]
+                
+                return ExecutionResult(
+                    success=True,
+                    message=f"Transaction '{transaction_id}' rolled back successfully"
+                )
+                
+            except Exception as e:
+                return ExecutionResult(
+                    success=False,
+                    error=f"Failed to rollback transaction: {str(e)}"
+                )

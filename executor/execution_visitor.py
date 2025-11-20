@@ -16,6 +16,7 @@ from ..models import (
     DropTablePlan
 )
 from ..interfaces import AbstractStorageManager, AbstractConcurrencyControlManager
+import time
 
 
 class ExecutionVisitor(QueryPlanVisitor):
@@ -29,15 +30,36 @@ class ExecutionVisitor(QueryPlanVisitor):
         self.concurrency_manager = concurrency_manager
         self.current_transaction = current_transaction
     
-    def visit_table_scan(self, node: TableScanNode) -> Rows:
-        lock_granted = self.concurrency_manager.request_lock(
-            self.transaction_id,
-            f"{node.table_name}:0",
-            "READ"
-        )
+    def _request_lock_with_wait(self, resource_id: str, lock_type: str) -> bool:
+        """Helper untuk Wait/Retry dalam visitor"""
+        if not self.concurrency_manager or self.current_transaction is None:
+            return True
+
+        max_retries = 10
+        retry_count = 0
+
+        while retry_count < max_retries:
+            result = self.concurrency_manager.request_lock(
+                self.current_transaction,
+                resource_id,
+                lock_type
+            )
+
+            if result.granted:
+                return True
+
+            if result.resolution == "WAIT":
+                time.sleep(result.wait_time)
+                retry_count += 1
+            elif result.resolution == "ABORT" or result.resolution == "RESTART":
+                raise RuntimeError(f"Lock denied for {resource_id}: {result.resolution}")
+            else:
+                return False
         
-        if not lock_granted:
-            raise RuntimeError(f"Failed to acquire READ lock on table: {node.table_name}")
+        raise RuntimeError(f"Timeout waiting for lock on {resource_id}")
+
+    def visit_table_scan(self, node: TableScanNode) -> Rows:
+        self._request_lock_with_wait(f"{node.table_name}:0", "READ")
         
         return self.storage_manager.read_table(node.table_name)
     
@@ -139,21 +161,14 @@ class ExecutionVisitor(QueryPlanVisitor):
         start_time = datetime.now()
         
         try:
-            lock_granted = self.concurrency_manager.request_lock(
-                self.transaction_id,
-                f"{plan.table_name}:0", 
-                "WRITE"
-            )
-            
-            if not lock_granted:
-                raise RuntimeError(f"Failed to acquire WRITE lock on table: {plan.table_name}")
+            self._request_lock_with_wait(f"{plan.table_name}:0", "WRITE")
             
             rows = Rows(columns=plan.columns, data=[plan.values])
             
             inserted_rows = self.storage_manager.insert_rows(
                 plan.table_name,
                 rows,
-                self.transaction_id
+                self.current_transaction
             )
             
             execution_time = (datetime.now() - start_time).total_seconds()
@@ -163,7 +178,7 @@ class ExecutionVisitor(QueryPlanVisitor):
                 affected_rows=inserted_rows,
                 message=f"Inserted {inserted_rows} row(s) into {plan.table_name}",
                 execution_time=execution_time,
-                transaction_id=self.transaction_id,
+                transaction_id=self.current_transaction,
                 query=f"INSERT INTO {plan.table_name} VALUES ..."
             )
             
@@ -173,21 +188,14 @@ class ExecutionVisitor(QueryPlanVisitor):
                 success=False,
                 error=f"Insert failed: {str(e)}",
                 execution_time=execution_time,
-                transaction_id=self.transaction_id
+                transaction_id=self.current_transaction
             )
     
     def visit_update(self, plan: UpdatePlan) -> ExecutionResult:
         start_time = datetime.now()
         
         try:
-            lock_granted = self.concurrency_manager.request_lock(
-                self.transaction_id,
-                f"{plan.table_name}:0", 
-                "WRITE"
-            )
-            
-            if not lock_granted:
-                raise RuntimeError(f"Failed to acquire WRITE lock on table: {plan.table_name}")
+            self._request_lock_with_wait(f"{plan.table_name}:0", "WRITE")
             
             condition_dict = self._convert_where_to_dict(plan.where) if plan.where else None
             
@@ -205,7 +213,7 @@ class ExecutionVisitor(QueryPlanVisitor):
                 affected_rows=affected_rows,
                 message=f"Updated {affected_rows} row(s) in {plan.table_name}{where_desc}",
                 execution_time=execution_time,
-                transaction_id=self.transaction_id,
+                transaction_id=self.current_transaction,
                 query=f"UPDATE {plan.table_name} SET ..."
             )
             
@@ -215,21 +223,14 @@ class ExecutionVisitor(QueryPlanVisitor):
                 success=False,
                 error=f"Update failed: {str(e)}",
                 execution_time=execution_time,
-                transaction_id=self.transaction_id
+                transaction_id=self.current_transaction
             )
     
     def visit_delete(self, plan: DeletePlan) -> ExecutionResult:
         start_time = datetime.now()
         
         try:
-            lock_granted = self.concurrency_manager.request_lock(
-                self.transaction_id,
-                f"{plan.table_name}:0", 
-                "WRITE"
-            )
-            
-            if not lock_granted:
-                raise RuntimeError(f"Failed to acquire WRITE lock on table: {plan.table_name}")
+            self._request_lock_with_wait(f"{plan.table_name}:0", "WRITE")
             
             if plan.where:
                 condition_dict = self._convert_where_to_dict(plan.where)
@@ -249,7 +250,7 @@ class ExecutionVisitor(QueryPlanVisitor):
                 affected_rows=deleted_rows,
                 message=f"Deleted {deleted_rows} row(s) from {plan.table_name}{where_desc}",
                 execution_time=execution_time,
-                transaction_id=self.transaction_id,
+                transaction_id=self.current_transaction,
                 query=f"DELETE FROM {plan.table_name} ..."
             )
             
@@ -259,7 +260,7 @@ class ExecutionVisitor(QueryPlanVisitor):
                 success=False,
                 error=f"Delete failed: {str(e)}",
                 execution_time=execution_time,
-                transaction_id=self.transaction_id
+                transaction_id=self.current_transaction
             )
     
     # Operasi DDL
@@ -280,7 +281,7 @@ class ExecutionVisitor(QueryPlanVisitor):
                     success=True,
                     message=f"Table '{plan.table_name}' created successfully with {len(plan.schema)} columns",
                     execution_time=execution_time,
-                    transaction_id=self.transaction_id,
+                    transaction_id=self.current_transaction,
                     query=f"CREATE TABLE {plan.table_name} ..."
                 )
             else:
@@ -288,7 +289,7 @@ class ExecutionVisitor(QueryPlanVisitor):
                     success=False,
                     error=f"Failed to create table '{plan.table_name}'",
                     execution_time=execution_time,
-                    transaction_id=self.transaction_id
+                    transaction_id=self.current_transaction
                 )
                 
         except Exception as e:
@@ -297,7 +298,7 @@ class ExecutionVisitor(QueryPlanVisitor):
                 success=False,
                 error=f"Create table failed: {str(e)}",
                 execution_time=execution_time,
-                transaction_id=self.transaction_id
+                transaction_id=self.current_transaction
             )
     
     def visit_drop_table(self, plan: DropTablePlan) -> ExecutionResult:
@@ -313,7 +314,7 @@ class ExecutionVisitor(QueryPlanVisitor):
                     success=True,
                     message=f"Table '{plan.table_name}' dropped successfully",
                     execution_time=execution_time,
-                    transaction_id=self.transaction_id,
+                    transaction_id=self.current_transaction,
                     query=f"DROP TABLE {plan.table_name}"
                 )
             else:
@@ -321,7 +322,7 @@ class ExecutionVisitor(QueryPlanVisitor):
                     success=False,
                     error=f"Failed to drop table '{plan.table_name}'",
                     execution_time=execution_time,
-                    transaction_id=self.transaction_id
+                    transaction_id=self.current_transaction
                 )
                 
         except Exception as e:
@@ -330,7 +331,7 @@ class ExecutionVisitor(QueryPlanVisitor):
                 success=False,
                 error=f"Drop table failed: {str(e)}",
                 execution_time=execution_time,
-                transaction_id=self.transaction_id
+                transaction_id=self.current_transaction
             )
     
     # Helper methods
