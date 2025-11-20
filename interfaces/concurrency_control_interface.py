@@ -4,7 +4,7 @@ from dataclasses import dataclass
 @dataclass
 class LockResult:
     granted: bool
-    resolution: str = "ABORT" # 'WAIT', 'ABORT', 'RESTART', 'PROCEED'
+    status: str  # 'GRANTED', 'WAITING', 'FAILED'
     wait_time: float = 0.5    # Suggested wait time in seconds
 
 class AbstractConcurrencyControlManager(ABC):

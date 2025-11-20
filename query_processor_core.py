@@ -49,49 +49,37 @@ class QueryProcessor:
     def get_executor(self) -> QueryExecutor:
         return self.executor
     
-    def execute_query(
-        self, 
-        query: str, 
-        transaction_id: Optional[int] = None
-    ) -> ExecutionResult:
-        start_time = datetime.now()
-        
+    def execute_query(self, query: str, transaction_id: Optional[int] = None) -> ExecutionResult:
+        """
+        Executes a SQL query.
+        If transaction_id is provided, executes within that transaction context.
+        """
         try:
-            # Log query ke FailureRecoveryManager
-            if transaction_id:
-                self.recovery_manager.log_query(transaction_id, query)
+            # 1. Parse & Optimize
+            # The optimizer might return a Plan or a Result (for DDL)
+            plan = self.optimizer.optimize(query)
             
-            # Get atau create transaction
-            with self._lock:
-                transaction = self._get_or_create_transaction(transaction_id)
-            transaction.add_query(query)
-            
-            # Kirim ke QueryOptimizer dan dapatkan QueryPlan tree
-            try:
-                plan_node = self.optimizer.optimize(query)
-            except Exception as e:
-                return ExecutionResult(
-                    success=False,
-                    error=f"Optimization error: {str(e)}",
-                    execution_time=self._calculate_execution_time(start_time)
-                )
-            
-            # Eksekusi plan tree menggunakan QueryExecutor
-            result = self.executor.execute(
-                plan_node,
-                transaction
-            )
-            
-            # Update execution time
-            result.execution_time = self._calculate_execution_time(start_time)
+            # 2. Handle direct execution results (like from DDL regex bypass)
+            if isinstance(plan, ExecutionResult):
+                return plan
+
+            # 3. Prepare Transaction Object
+            # FIX: Wrap the int ID into a Transaction object for the Executor
+            txn_obj = None
+            if transaction_id is not None:
+                txn_obj = Transaction(transaction_id)
+
+            # 4. Execute
+            # Pass the Transaction object, not the int
+            result = self.executor.execute(plan, txn_obj)
             
             return result
-            
+
         except Exception as e:
             return ExecutionResult(
-                success=False,
-                error=f"Query execution failed: {str(e)}",
-                execution_time=self._calculate_execution_time(start_time)
+                success=False, 
+                error=str(e),
+                message=f"Error executing query: {str(e)}"
             )
     
     def _get_or_create_transaction(self, transaction_id: Optional[int]) -> Transaction:
@@ -142,7 +130,15 @@ class QueryProcessor:
                 transaction.commit()
                 
                 # Commit di Concurrency Manager
-                self.concurrency_manager.commit_transaction(transaction_id)
+                if not self.concurrency_manager.commit_transaction(transaction_id):
+                    return ExecutionResult(
+                        success=False,
+                        error=f"Failed to commit transaction {transaction_id} in concurrency manager"
+                    )
+                
+                # Release Locks and End Transaction
+                self.concurrency_manager.commit_flushed(transaction_id)
+                self.concurrency_manager.end_transaction(transaction_id)
                 
                 # Log commit
                 self.recovery_manager.log_transaction_commit(transaction_id)
