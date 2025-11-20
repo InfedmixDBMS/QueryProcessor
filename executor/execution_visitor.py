@@ -48,18 +48,18 @@ class ExecutionVisitor(QueryPlanVisitor):
             if result.granted:
                 return True
 
-            if result.resolution == "WAIT":
+            if result.status == "WAITING":
                 time.sleep(result.wait_time)
                 retry_count += 1
-            elif result.resolution == "ABORT" or result.resolution == "RESTART":
-                raise RuntimeError(f"Lock denied for {resource_id}: {result.resolution}")
+            elif result.status == "FAILED":
+                raise RuntimeError(f"Lock denied for {resource_id}: {result.status}")
             else:
                 return False
         
         raise RuntimeError(f"Timeout waiting for lock on {resource_id}")
 
     def visit_table_scan(self, node: TableScanNode) -> Rows:
-        self._request_lock_with_wait(f"{node.table_name}:0", "READ")
+        self._request_lock_with_wait(node.table_name, "READ")
         
         return self.storage_manager.read_table(node.table_name)
     
@@ -161,7 +161,7 @@ class ExecutionVisitor(QueryPlanVisitor):
         start_time = datetime.now()
         
         try:
-            self._request_lock_with_wait(f"{plan.table_name}:0", "WRITE")
+            self._request_lock_with_wait(plan.table_name, "WRITE")
             
             rows = Rows(columns=plan.columns, data=[plan.values])
             
@@ -195,7 +195,7 @@ class ExecutionVisitor(QueryPlanVisitor):
         start_time = datetime.now()
         
         try:
-            self._request_lock_with_wait(f"{plan.table_name}:0", "WRITE")
+            self._request_lock_with_wait(plan.table_name, "WRITE")
             
             condition_dict = self._convert_where_to_dict(plan.where) if plan.where else None
             
@@ -230,7 +230,7 @@ class ExecutionVisitor(QueryPlanVisitor):
         start_time = datetime.now()
         
         try:
-            self._request_lock_with_wait(f"{plan.table_name}:0", "WRITE")
+            self._request_lock_with_wait(plan.table_name, "WRITE")
             
             if plan.where:
                 condition_dict = self._convert_where_to_dict(plan.where)
