@@ -1,5 +1,11 @@
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 
+@dataclass
+class LockResult:
+    granted: bool
+    resolution: str = "ABORT" # 'WAIT', 'ABORT', 'RESTART', 'PROCEED'
+    wait_time: float = 0.5    # Suggested wait time in seconds
 
 class AbstractConcurrencyControlManager(ABC):
     
@@ -29,10 +35,11 @@ class AbstractConcurrencyControlManager(ABC):
         transaction_id: int, 
         resource_id: str, 
         lock_type: str
-    ) -> bool:
+    ) -> LockResult:
         """
         Ekuivalen dengan ccm.transaction_query().
         Request akses ke resource (tabel).
+        Return LockResult: success status dan resolution strategy.
         """
         pass
     
