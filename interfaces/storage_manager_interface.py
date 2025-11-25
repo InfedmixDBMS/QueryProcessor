@@ -1,8 +1,8 @@
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional
-from ..models import Rows
-# TODO: Import Schema, DataRetrieval, DataWrite, DataDeletion from Storage Manager Module
 
+from StorageManager.classes.DataModels import DataDeletion, DataRetrieval, DataWrite, Schema
+from ..models import Rows
 
 class AbstractStorageManager(ABC):
     
@@ -25,15 +25,14 @@ class AbstractStorageManager(ABC):
     #   column -> List[str],
     #   conditions -> List[Condition],
     #   new_value -> List[T] | None
-
+    
     @abstractmethod
     def write_block(self, data_write: DataWrite) -> int:
         pass
-
+    
     # DataDeletion: 
     #   table -> str,
     #   conditions -> List[Condition]
-    
     @abstractmethod
     def delete_block(self, data_deletion: DataDeletion) -> int:
         pass
