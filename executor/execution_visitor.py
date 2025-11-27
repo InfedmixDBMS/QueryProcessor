@@ -109,6 +109,7 @@ class ExecutionVisitor(QueryPlanVisitor):
         raise RuntimeError(f"Timeout waiting for lock on {resource_id}")
 
     def visit_table_scan(self, node: TableScanNode) -> Rows:
+        """Visit table scan node using DataRetrieval API"""
         self._request_lock_with_wait(node.table_name, "READ")
         
         # Buat awal doang, ambil SEMUA KOLOM dan SEMUA ROW
