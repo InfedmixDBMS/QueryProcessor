@@ -20,7 +20,7 @@ from ..models import (
 from ..interfaces import AbstractStorageManager, AbstractConcurrencyControlManager, AbstractFailureRecoveryManager
 
 try:
-    from StorageManager.classes.DataModels import DataDeletion, DataRetrieval, DataWrite, Schema, Condition
+    from StorageManager.classes.DataModels import DataDeletion, DataRetrieval, DataWrite, Schema, Condition, Operation
     from StorageManager.classes.Types import IntType, VarCharType, FloatType
 except ImportError:
     # Bikin Struct Sendiri
@@ -109,7 +109,6 @@ class ExecutionVisitor(QueryPlanVisitor):
         raise RuntimeError(f"Timeout waiting for lock on {resource_id}")
 
     def visit_table_scan(self, node: TableScanNode) -> Rows:
-        """Visit table scan node using DataRetrieval API"""
         self._request_lock_with_wait(node.table_name, "READ")
         
         # Buat awal doang, ambil SEMUA KOLOM dan SEMUA ROW
@@ -255,17 +254,13 @@ class ExecutionVisitor(QueryPlanVisitor):
         try:
             self._request_lock_with_wait(plan.table_name, "WRITE")
             
-            # TODO: Pake Load Schema Storage Manager, bug nya kolom = []
             columns = plan.columns
-            # if not columns:
-            #     schema_info = self.storage_manager.get_table_schema(plan.table_name)
-            #     if schema_info:
-            #         columns = [col['name'] for col in schema_info if not col.get('system', False)]
-            #     else:
-            #         raise Exception(f"Cannot determine columns for table {plan.table_name}")
+            if not columns:
+                all_columns = self.storage_manager.load_schema_names(plan.table_name)
+                columns = [col for col in all_columns if col != '__row_id']
             
-            # if len(columns) != len(plan.values):
-            #     raise Exception(f"Column count ({len(columns)}) does not match value count ({len(plan.values)})")
+            if len(columns) != len(plan.values):
+                raise Exception(f"Column count ({len(columns)}) does not match value count ({len(plan.values)})")
             
             if self.failure_recovery_manager and self.current_transaction:
                 predicted_row_id = self.storage_manager.get_next_row_id(plan.table_name)
@@ -285,7 +280,6 @@ class ExecutionVisitor(QueryPlanVisitor):
                     new_value=dict(zip(columns, plan.values))
                 )
             
-            # Construct DataWrite
             data_write = DataWrite(
                 table=plan.table_name,
                 column=columns,
@@ -293,7 +287,6 @@ class ExecutionVisitor(QueryPlanVisitor):
                 new_value=[plan.values]
             )
             
-            # NOW write to disk (after logging)
             inserted_rows = self.storage_manager.write_block(data_write)
             
             execution_time = (datetime.now() - start_time).total_seconds()
@@ -326,7 +319,6 @@ class ExecutionVisitor(QueryPlanVisitor):
             if plan.where:
                 storage_conditions = self._convert_where_to_storage_conditions([plan.where])
             
-            # TODO: Fix update setelah nanti main bisa
             if self.failure_recovery_manager and self.current_transaction:
                 data_retrieval = DataRetrieval(
                     table=plan.table_name,
@@ -336,33 +328,56 @@ class ExecutionVisitor(QueryPlanVisitor):
                 old_rows = self.storage_manager.read_block(data_retrieval)
                 
                 if old_rows and old_rows.data:
+                    all_columns = self.storage_manager.load_schema_names(plan.table_name)
+                    all_columns = [col for col in all_columns if col != '__row_id'] 
+
+                    updated_rows = []
                     for old_row in old_rows.data:
-                        if 'id' in old_rows.columns:
-                            row_id = old_row[old_rows.columns.index('id')]
-                        else:
-                            row_id = old_row[0]
+                        old_row_dict = dict(zip(old_rows.columns, old_row))
+            
+                        new_row_dict = {}
+                        for col in all_columns:
+                            if col in plan.set_clause:
+                                new_row_dict[col] = plan.set_clause[col]
+                            elif col in old_row_dict:
+                                new_row_dict[col] = old_row_dict[col]
+                            else:
+                                new_row_dict[col] = None
                         
-                        old_value_dict = dict(zip(old_rows.columns, old_row))
+                        new_row_values = [new_row_dict[col] for col in all_columns]
+                        updated_rows.append(new_row_values)
                         
-                        log_exec_result = ExecutionResult(
-                            success=True,
-                            transaction_id=self.current_transaction,
-                            query=f"UPDATE {plan.table_name}"
-                        )
-                        
-                        self.failure_recovery_manager.write_log(
-                            log_exec_result, 
-                            table=plan.table_name, 
-                            key=row_id, 
-                            old_value=old_value_dict, 
-                            new_value=plan.set_clause
-                        )
+                        if self.failure_recovery_manager and self.current_transaction:
+                            if '__row_id' in old_row_dict:
+                                row_id = old_row_dict['__row_id']
+                            else:
+                                row_id = old_row[0]  
+                            
+                            log_exec_result = ExecutionResult(
+                                success=True,
+                                transaction_id=self.current_transaction,
+                                query=f"UPDATE {plan.table_name}"
+                            )
+                            
+                            self.failure_recovery_manager.write_log(
+                                log_exec_result, 
+                                table=plan.table_name, 
+                                key=row_id, 
+                                old_value=old_row_dict, 
+                                new_value=plan.set_clause
+                            )
+            
+            data_deletion = DataDeletion(
+                table=plan.table_name,
+                conditions=storage_conditions
+            )
+            deleted_count = self.storage_manager.delete_block(data_deletion)
             
             data_write = DataWrite(
                 table=plan.table_name,
-                column=list(plan.set_clause.keys()),
-                conditions=storage_conditions,
-                new_value=[list(plan.set_clause.values())]
+                column=all_columns,  
+                conditions=[],
+                new_value=updated_rows  
             )
             
             affected_rows = self.storage_manager.write_block(data_write)
@@ -390,7 +405,6 @@ class ExecutionVisitor(QueryPlanVisitor):
             )
     
     def visit_delete(self, plan: DeletePlan) -> ExecutionResult:
-        """Visit delete plan using DataDeletion API"""
         start_time = datetime.now()
         
         try:
@@ -404,8 +418,8 @@ class ExecutionVisitor(QueryPlanVisitor):
             old_rows = self.storage_manager.read_block
             if self.failure_recovery_manager and self.current_transaction and old_rows:
                 for old_row in old_rows.data:
-                    if 'id' in old_rows.columns:
-                        row_id = old_row[old_rows.columns.index('id')]
+                    if '__row_id' in old_rows.columns:
+                        row_id = old_row[old_rows.columns.index('__row_id')]
                     else:
                         row_id = old_row[0]
                 
@@ -527,7 +541,6 @@ class ExecutionVisitor(QueryPlanVisitor):
     # Helper methods
     
     def _convert_where_to_storage_conditions(self, where_conditions: List[WhereCondition]) -> List[Condition]:
-        """Convert QueryProcessor WhereCondition to StorageManager Condition"""
         storage_conditions = []
         
         for where_cond in where_conditions:
@@ -552,7 +565,6 @@ class ExecutionVisitor(QueryPlanVisitor):
         return storage_conditions
     
     def _convert_to_storage_type(self, column_type: str):
-        """Convert string column type to StorageManager type"""
         column_type = column_type.upper()
         
         if column_type == 'INT' or column_type == 'INTEGER':
