@@ -24,7 +24,7 @@ class QueryProcessor:
         self.storage_manager = storage_manager
         self.concurrency_manager = concurrency_manager
         self.recovery_manager = recovery_manager
-        self.executor = QueryExecutor(storage_manager, concurrency_manager)
+        self.executor = QueryExecutor(storage_manager, concurrency_manager, recovery_manager)
         self.active_transactions: Dict[int, Transaction] = {}
         self._lock = threading.Lock()
 
@@ -55,22 +55,16 @@ class QueryProcessor:
         If transaction_id is provided, executes within that transaction context.
         """
         try:
-            # 1. Parse & Optimize
-            # The optimizer might return a Plan or a Result (for DDL)
+
             plan = self.optimizer.optimize(query)
             
-            # 2. Handle direct execution results (like from DDL regex bypass)
             if isinstance(plan, ExecutionResult):
                 return plan
 
-            # 3. Prepare Transaction Object
-            # FIX: Wrap the int ID into a Transaction object for the Executor
             txn_obj = None
             if transaction_id is not None:
                 txn_obj = Transaction(transaction_id)
 
-            # 4. Execute
-            # Pass the Transaction object, not the int
             result = self.executor.execute(plan, txn_obj)
             
             return result
@@ -136,7 +130,6 @@ class QueryProcessor:
                         error=f"Failed to commit transaction {transaction_id} in concurrency manager"
                     )
                 
-                # Release Locks and End Transaction
                 self.concurrency_manager.commit_flushed(transaction_id)
                 self.concurrency_manager.end_transaction(transaction_id)
                 
