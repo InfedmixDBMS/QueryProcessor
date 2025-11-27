@@ -30,7 +30,7 @@ class QueryExecutor:
     ):
         self.storage_manager = storage_manager
         self.concurrency_manager = concurrency_manager
-        self.failure_recovery = failure_recovery
+        self.recovery_manager = failure_recovery 
         self.current_transaction: Optional[int] = None
     
     def execute(self, plan: QueryPlan, transaction: Optional[Transaction] = None) -> ExecutionResult:
@@ -38,7 +38,8 @@ class QueryExecutor:
         visitor = ExecutionVisitor(
             self.storage_manager,
             self.concurrency_manager,
-            transaction_id
+            transaction_id,
+            self.recovery_manager
         )
         
         try:
@@ -102,7 +103,6 @@ class QueryExecutor:
             )
     
     def _acquire_locks(self, plan: QueryPlan, lock_type: str) -> bool:
-        # Deprecated: Standard 2PL acquires locks in ExecutionVisitor
         return True
     
     def _extract_tables(self, plan: QueryPlan) -> list:
@@ -120,7 +120,7 @@ class QueryExecutor:
         if hasattr(plan, 'right_child') and plan.right_child:
             tables.extend(self._extract_tables(plan.right_child))
         
-        return list(set(tables))  # Remove duplicates
+        return list(set(tables))
     
     def _flush_to_storage(self, result: ExecutionResult) -> bool:
         """Flush result ke storage (untuk write operations)"""

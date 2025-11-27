@@ -17,11 +17,11 @@ from ..models import (
     WhereCondition,
     ComparisonOperator
 )
-from ..interfaces import AbstractStorageManager, AbstractConcurrencyControlManager
+from ..interfaces import AbstractStorageManager, AbstractConcurrencyControlManager, AbstractFailureRecoveryManager
 
 try:
     from StorageManager.classes.DataModels import DataDeletion, DataRetrieval, DataWrite, Schema, Condition
-    from StorageManager.classes.DataTypes import IntType, VarCharType, FloatType
+    from StorageManager.classes.Types import IntType, VarCharType, FloatType
 except ImportError:
     # Bikin Struct Sendiri
     class DataRetrieval:
@@ -73,11 +73,13 @@ class ExecutionVisitor(QueryPlanVisitor):
         self,
         storage_manager: AbstractStorageManager,
         concurrency_manager: Optional[AbstractConcurrencyControlManager] = None,
-        current_transaction: Optional[int] = None
+        current_transaction: Optional[int] = None,
+        failure_recovery_manager: Optional[AbstractFailureRecoveryManager] = None
     ):
         self.storage_manager = storage_manager
         self.concurrency_manager = concurrency_manager
         self.current_transaction = current_transaction
+        self.failure_recovery_manager = failure_recovery_manager
     
     def _request_lock_with_wait(self, resource_id: str, lock_type: str) -> bool:
         if not self.concurrency_manager or self.current_transaction is None:
@@ -114,7 +116,7 @@ class ExecutionVisitor(QueryPlanVisitor):
         data_retrieval = DataRetrieval(
             table=node.table_name,
             column=[],
-            condition=[]
+            conditions=[]
         )
         
         return self.storage_manager.read_block(data_retrieval)
@@ -129,7 +131,7 @@ class ExecutionVisitor(QueryPlanVisitor):
             data_retrieval = DataRetrieval(
                 table=table_name,
                 column=[],
-                condition=storage_conditions
+                conditions=storage_conditions
             )
             
             return self.storage_manager.read_block(data_retrieval)
@@ -159,7 +161,7 @@ class ExecutionVisitor(QueryPlanVisitor):
             data_retrieval = DataRetrieval(
                 table=table_name,
                 column=node.columns,
-                condition=[]
+                conditions=[]
             )
             
             return self.storage_manager.read_block(data_retrieval)
@@ -253,14 +255,45 @@ class ExecutionVisitor(QueryPlanVisitor):
         try:
             self._request_lock_with_wait(plan.table_name, "WRITE")
             
+            # TODO: Pake Load Schema Storage Manager, bug nya kolom = []
+            columns = plan.columns
+            # if not columns:
+            #     schema_info = self.storage_manager.get_table_schema(plan.table_name)
+            #     if schema_info:
+            #         columns = [col['name'] for col in schema_info if not col.get('system', False)]
+            #     else:
+            #         raise Exception(f"Cannot determine columns for table {plan.table_name}")
+            
+            # if len(columns) != len(plan.values):
+            #     raise Exception(f"Column count ({len(columns)}) does not match value count ({len(plan.values)})")
+            
+            if self.failure_recovery_manager and self.current_transaction:
+                predicted_row_id = self.storage_manager.get_next_row_id(plan.table_name)
+                
+                #new_value_dict = dict(zip(columns, plan.values))
+                
+                log_exec_result = ExecutionResult(
+                    success=True,
+                    transaction_id=self.current_transaction,
+                    query=f"INSERT INTO {plan.table_name}"
+                )
+                self.failure_recovery_manager.write_log(
+                    log_exec_result, 
+                    table=plan.table_name, 
+                    key=predicted_row_id, 
+                    old_value=None, 
+                    new_value=dict(zip(columns, plan.values))
+                )
+            
             # Construct DataWrite
             data_write = DataWrite(
                 table=plan.table_name,
-                column=plan.columns,
+                column=columns,
                 conditions=[],
-                new_value=plan.values
+                new_value=[plan.values]
             )
             
+            # NOW write to disk (after logging)
             inserted_rows = self.storage_manager.write_block(data_write)
             
             execution_time = (datetime.now() - start_time).total_seconds()
@@ -289,17 +322,47 @@ class ExecutionVisitor(QueryPlanVisitor):
         try:
             self._request_lock_with_wait(plan.table_name, "WRITE")
             
-            # Convert WHERE conditions to storage conditions
             storage_conditions = []
             if plan.where:
                 storage_conditions = self._convert_where_to_storage_conditions([plan.where])
             
-            # Create DataWrite object for update operation
+            # TODO: Fix update setelah nanti main bisa
+            if self.failure_recovery_manager and self.current_transaction:
+                data_retrieval = DataRetrieval(
+                    table=plan.table_name,
+                    column=[],
+                    conditions=storage_conditions
+                )
+                old_rows = self.storage_manager.read_block(data_retrieval)
+                
+                if old_rows and old_rows.data:
+                    for old_row in old_rows.data:
+                        if 'id' in old_rows.columns:
+                            row_id = old_row[old_rows.columns.index('id')]
+                        else:
+                            row_id = old_row[0]
+                        
+                        old_value_dict = dict(zip(old_rows.columns, old_row))
+                        
+                        log_exec_result = ExecutionResult(
+                            success=True,
+                            transaction_id=self.current_transaction,
+                            query=f"UPDATE {plan.table_name}"
+                        )
+                        
+                        self.failure_recovery_manager.write_log(
+                            log_exec_result, 
+                            table=plan.table_name, 
+                            key=row_id, 
+                            old_value=old_value_dict, 
+                            new_value=plan.set_clause
+                        )
+            
             data_write = DataWrite(
                 table=plan.table_name,
                 column=list(plan.set_clause.keys()),
                 conditions=storage_conditions,
-                new_value=list(plan.set_clause.values())
+                new_value=[list(plan.set_clause.values())]
             )
             
             affected_rows = self.storage_manager.write_block(data_write)
@@ -333,12 +396,29 @@ class ExecutionVisitor(QueryPlanVisitor):
         try:
             self._request_lock_with_wait(plan.table_name, "WRITE")
             
-            # Convert WHERE conditions to storage conditions
             storage_conditions = []
             if plan.where:
                 storage_conditions = self._convert_where_to_storage_conditions([plan.where])
+
+            # TODO: FIX setelah main aman
+            old_rows = self.storage_manager.read_block
+            if self.failure_recovery_manager and self.current_transaction and old_rows:
+                for old_row in old_rows.data:
+                    if 'id' in old_rows.columns:
+                        row_id = old_row[old_rows.columns.index('id')]
+                    else:
+                        row_id = old_row[0]
+                
+                    old_value_dict = dict(zip(old_rows.columns, old_row))
+                    
+                    frm_exec_result = ExecutionResult(
+                        success=True,
+                        transaction_id=self.current_transaction,
+                        query=f"DELETE FROM {plan.table_name}",
+                    )
+
+                    self.failure_recovery_manager.write_log(frm_exec_result, plan.table_name, row_id, old_value_dict, None)
             
-            # Create DataDeletion object
             data_deletion = DataDeletion(
                 table=plan.table_name,
                 conditions=storage_conditions
@@ -377,7 +457,6 @@ class ExecutionVisitor(QueryPlanVisitor):
             for column_name, column_type in plan.schema.items():
                 schema_columns[column_name] = self._convert_to_storage_type(column_type)
             
-            # Create Schema object
             schema = Schema(columns=schema_columns)
             
             success = self.storage_manager.create_table(
@@ -452,7 +531,6 @@ class ExecutionVisitor(QueryPlanVisitor):
         storage_conditions = []
         
         for where_cond in where_conditions:
-            # Map ComparisonOperator to storage operation strings
             operation_map = {
                 ComparisonOperator.EQUALS: '=',
                 ComparisonOperator.NOT_EQUALS: '<>',
@@ -480,16 +558,15 @@ class ExecutionVisitor(QueryPlanVisitor):
         if column_type == 'INT' or column_type == 'INTEGER':
             return IntType()
         elif column_type.startswith('VARCHAR'):
-            # Extract length from VARCHAR(n)
             if '(' in column_type and ')' in column_type:
                 length_str = column_type[column_type.find('(')+1:column_type.find(')')]
                 try:
                     length = int(length_str)
                     return VarCharType(length)
                 except ValueError:
-                    return VarCharType(255)  # Default length
+                    return VarCharType(255) 
             else:
-                return VarCharType(255)  # Default length
+                return VarCharType(255)
         elif column_type == 'FLOAT' or column_type == 'DOUBLE' or column_type == 'DECIMAL':
             return FloatType()
         else:
