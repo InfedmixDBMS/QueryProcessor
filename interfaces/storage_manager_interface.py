@@ -1,37 +1,53 @@
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional
-from ..models import Rows
 
+from StorageManager.classes.DataModels import DataDeletion, DataRetrieval, DataWrite, Schema
+from ..models import Rows
 
 class AbstractStorageManager(ABC):
     
+    # DataRetrieval: 
+    #   table -> str, 
+    #   column -> List[str], 
+    #   condition -> List[Condition]
+
+    # Condition: 
+    #   column -> str, 
+    #   operation -> enum('=', '<>', '>', '<', '>=', '<='), 
+    #   operand -> int | str | float
+
     @abstractmethod
-    def read_table(self, table_name: str, columns: Optional[List[str]] = None) -> Rows:
+    def read_block(self, data_retrieval: DataRetrieval) -> Rows:
         pass
     
-    @abstractmethod
-    def write_table(self, table_name: str, rows: Rows) -> int:
-        pass
+    # DataWrite: 
+    #   table -> str,
+    #   column -> List[str],
+    #   conditions -> List[Condition],
+    #   new_value -> List[T] | None
     
     @abstractmethod
-    def update_rows(
-        self, 
-        table_name: str, 
-        updates: Dict[str, Any], 
-        condition: Optional[Dict[str, Any]] = None
-    ) -> int:
+    def write_block(self, data_write: DataWrite) -> int:
         pass
     
+    # DataDeletion: 
+    #   table -> str,
+    #   conditions -> List[Condition]
     @abstractmethod
-    def delete_rows(self, table_name: str, condition: Optional[Dict[str, Any]] = None) -> int:
+    def delete_block(self, data_deletion: DataDeletion) -> int:
         pass
+
+    # Schema:
+    #   columns:
+    #       "id" = IntType(),
+    #       "name" = VarCharType(50),
+    #       "ipk" = FloatType()
+    #   column_order: list(columns.keys())
+    #   column_index: {name: i for i, name in enumerate(self.column_order)}
+    #   size: int (auto-calculated, ga perlu dihitung manual)
     
     @abstractmethod
-    def insert_rows(self, table_name: str, rows: Rows) -> int:
-        pass
-    
-    @abstractmethod
-    def create_table(self, table_name: str, schema: Dict[str, str]) -> bool:
+    def create_table(self, table_name: str, schema: Schema) -> bool:
         pass
     
     @abstractmethod
