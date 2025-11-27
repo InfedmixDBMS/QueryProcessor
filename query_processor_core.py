@@ -50,10 +50,6 @@ class QueryProcessor:
         return self.executor
     
     def execute_query(self, query: str, transaction_id: Optional[int] = None) -> ExecutionResult:
-        """
-        Executes a SQL query.
-        If transaction_id is provided, executes within that transaction context.
-        """
         try:
 
             plan = self.optimizer.optimize(query)
