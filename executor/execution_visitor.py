@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
 from .plan_visitor import QueryPlanVisitor
 from ..models import (
     Rows,
@@ -13,9 +13,58 @@ from ..models import (
     UpdatePlan,
     DeletePlan,
     CreateTablePlan,
-    DropTablePlan
+    DropTablePlan,
+    WhereCondition,
+    ComparisonOperator
 )
 from ..interfaces import AbstractStorageManager, AbstractConcurrencyControlManager
+
+try:
+    from StorageManager.classes.DataModels import DataDeletion, DataRetrieval, DataWrite, Schema, Condition
+    from StorageManager.classes.DataTypes import IntType, VarCharType, FloatType
+except ImportError:
+    # Bikin Struct Sendiri
+    class DataRetrieval:
+        def __init__(self, table: str, column: List[str], condition: List['Condition'] = None):
+            self.table = table
+            self.column = column
+            self.condition = condition or []
+    
+    class DataWrite:
+        def __init__(self, table: str, column: List[str], conditions: List['Condition'] = None, new_value: List[Any] = None):
+            self.table = table
+            self.column = column
+            self.conditions = conditions or []
+            self.new_value = new_value or []
+    
+    class DataDeletion:
+        def __init__(self, table: str, conditions: List['Condition']):
+            self.table = table
+            self.conditions = conditions
+    
+    class Schema:
+        def __init__(self, columns: Dict[str, Any]):
+            self.columns = columns
+            self.column_order = list(columns.keys())
+            self.column_index = {name: i for i, name in enumerate(self.column_order)}
+            self.size = len(columns)
+    
+    class Condition:
+        def __init__(self, column: str, operation: str, operand: Any):
+            self.column = column
+            self.operation = operation
+            self.operand = operand
+    
+    class IntType:
+        pass
+    
+    class VarCharType:
+        def __init__(self, length: int):
+            self.length = length
+    
+    class FloatType:
+        pass
+
 import time
 
 
@@ -31,7 +80,6 @@ class ExecutionVisitor(QueryPlanVisitor):
         self.current_transaction = current_transaction
     
     def _request_lock_with_wait(self, resource_id: str, lock_type: str) -> bool:
-        """Helper untuk Wait/Retry dalam visitor"""
         if not self.concurrency_manager or self.current_transaction is None:
             return True
 
@@ -59,39 +107,81 @@ class ExecutionVisitor(QueryPlanVisitor):
         raise RuntimeError(f"Timeout waiting for lock on {resource_id}")
 
     def visit_table_scan(self, node: TableScanNode) -> Rows:
+        """Visit table scan node using DataRetrieval API"""
         self._request_lock_with_wait(node.table_name, "READ")
         
-        return self.storage_manager.read_table(node.table_name)
+        # Buat awal doang, ambil SEMUA KOLOM dan SEMUA ROW
+        data_retrieval = DataRetrieval(
+            table=node.table_name,
+            column=[],
+            condition=[]
+        )
+        
+        return self.storage_manager.read_block(data_retrieval)
     
     def visit_filter(self, node: FilterNode) -> Rows:
-        child_rows = node.child.accept(self)
-        
-        filtered_data = []
-        for row in child_rows.data:
-            row_dict = {col: val for col, val in zip(child_rows.columns, row)}
+        if hasattr(node.child, 'table_name') and isinstance(node.child, TableScanNode):
+            table_name = node.child.table_name
+            self._request_lock_with_wait(table_name, "READ")
             
-            if node.condition.evaluate(row_dict):
-                filtered_data.append(row)
+            storage_conditions = self._convert_where_to_storage_conditions([node.condition])
+            
+            data_retrieval = DataRetrieval(
+                table=table_name,
+                column=[],
+                condition=storage_conditions
+            )
+            
+            return self.storage_manager.read_block(data_retrieval)
         
-        return Rows(child_rows.columns, filtered_data)
+        # TOLONG REVIEW INI
+        else:
+            child_rows = node.child.accept(self)
+            
+            filtered_data = []
+            for row in child_rows.data:
+                row_dict = {col: val for col, val in zip(child_rows.columns, row)}
+                
+                if node.condition.evaluate(row_dict):
+                    filtered_data.append(row)
+            
+            return Rows(child_rows.columns, filtered_data)
     
     def visit_project(self, node: ProjectNode) -> Rows:
-        child_rows = node.child.accept(self)
+        if (hasattr(node.child, 'table_name') and isinstance(node.child, TableScanNode) 
+            and '*' not in node.columns):
+
+            table_name = node.child.table_name
+            
+            # TOLONG REVIEW INI
+            self._request_lock_with_wait(table_name, "READ")
+            
+            data_retrieval = DataRetrieval(
+                table=table_name,
+                column=node.columns,
+                condition=[]
+            )
+            
+            return self.storage_manager.read_block(data_retrieval)
         
-        if '*' in node.columns:
-            return child_rows
-        
-        try:
-            column_indices = [child_rows.columns.index(col) for col in node.columns]
-        except ValueError as e:
-            raise ValueError(f"Column not found during projection: {e}")
-        
-        projected_data = []
-        for row in child_rows.data:
-            projected_row = [row[idx] for idx in column_indices]
-            projected_data.append(projected_row)
-        
-        return Rows(node.columns, projected_data)
+        # TOLONG REVIEW INI
+        else:
+            child_rows = node.child.accept(self)
+            
+            if '*' in node.columns:
+                return child_rows
+            
+            try:
+                column_indices = [child_rows.columns.index(col) for col in node.columns]
+            except ValueError as e:
+                raise ValueError(f"Column not found during projection: {e}")
+            
+            projected_data = []
+            for row in child_rows.data:
+                projected_row = [row[idx] for idx in column_indices]
+                projected_data.append(projected_row)
+            
+            return Rows(node.columns, projected_data)
     
     def visit_sort(self, node: SortNode) -> Rows:
         child_rows = node.child.accept(self)
@@ -163,13 +253,15 @@ class ExecutionVisitor(QueryPlanVisitor):
         try:
             self._request_lock_with_wait(plan.table_name, "WRITE")
             
-            rows = Rows(columns=plan.columns, data=[plan.values])
-            
-            inserted_rows = self.storage_manager.insert_rows(
-                plan.table_name,
-                rows,
-                self.current_transaction
+            # Construct DataWrite
+            data_write = DataWrite(
+                table=plan.table_name,
+                column=plan.columns,
+                conditions=[],
+                new_value=plan.values
             )
+            
+            inserted_rows = self.storage_manager.write_block(data_write)
             
             execution_time = (datetime.now() - start_time).total_seconds()
             
@@ -197,13 +289,21 @@ class ExecutionVisitor(QueryPlanVisitor):
         try:
             self._request_lock_with_wait(plan.table_name, "WRITE")
             
-            condition_dict = self._convert_where_to_dict(plan.where) if plan.where else None
+            # Convert WHERE conditions to storage conditions
+            storage_conditions = []
+            if plan.where:
+                storage_conditions = self._convert_where_to_storage_conditions([plan.where])
             
-            affected_rows = self.storage_manager.update_rows(
-                plan.table_name,
-                plan.set_clause,
-                condition_dict
+            # Create DataWrite object for update operation
+            data_write = DataWrite(
+                table=plan.table_name,
+                column=list(plan.set_clause.keys()),
+                conditions=storage_conditions,
+                new_value=list(plan.set_clause.values())
             )
+            
+            affected_rows = self.storage_manager.write_block(data_write)
+            # TOLONG REVIEW INI, APAKAH SETELAHNYA PERLU delete_block?
             
             execution_time = (datetime.now() - start_time).total_seconds()
             
@@ -227,20 +327,24 @@ class ExecutionVisitor(QueryPlanVisitor):
             )
     
     def visit_delete(self, plan: DeletePlan) -> ExecutionResult:
+        """Visit delete plan using DataDeletion API"""
         start_time = datetime.now()
         
         try:
             self._request_lock_with_wait(plan.table_name, "WRITE")
             
+            # Convert WHERE conditions to storage conditions
+            storage_conditions = []
             if plan.where:
-                condition_dict = self._convert_where_to_dict(plan.where)
-            else:
-                condition_dict = None
+                storage_conditions = self._convert_where_to_storage_conditions([plan.where])
             
-            deleted_rows = self.storage_manager.delete_rows(
-                plan.table_name,
-                condition_dict
+            # Create DataDeletion object
+            data_deletion = DataDeletion(
+                table=plan.table_name,
+                conditions=storage_conditions
             )
+            
+            deleted_rows = self.storage_manager.delete_block(data_deletion)
             
             execution_time = (datetime.now() - start_time).total_seconds()
             
@@ -269,9 +373,16 @@ class ExecutionVisitor(QueryPlanVisitor):
         start_time = datetime.now()
         
         try:
+            schema_columns = {}
+            for column_name, column_type in plan.schema.items():
+                schema_columns[column_name] = self._convert_to_storage_type(column_type)
+            
+            # Create Schema object
+            schema = Schema(columns=schema_columns)
+            
             success = self.storage_manager.create_table(
                 plan.table_name,
-                plan.schema
+                schema
             )
             
             execution_time = (datetime.now() - start_time).total_seconds()
@@ -335,6 +446,54 @@ class ExecutionVisitor(QueryPlanVisitor):
             )
     
     # Helper methods
+    
+    def _convert_where_to_storage_conditions(self, where_conditions: List[WhereCondition]) -> List[Condition]:
+        """Convert QueryProcessor WhereCondition to StorageManager Condition"""
+        storage_conditions = []
+        
+        for where_cond in where_conditions:
+            # Map ComparisonOperator to storage operation strings
+            operation_map = {
+                ComparisonOperator.EQUALS: '=',
+                ComparisonOperator.NOT_EQUALS: '<>',
+                ComparisonOperator.GREATER_THAN: '>',
+                ComparisonOperator.LESS_THAN: '<',
+                ComparisonOperator.GREATER_EQUAL: '>=',
+                ComparisonOperator.LESS_EQUAL: '<='
+            }
+            
+            operation = operation_map.get(where_cond.operator, '=')
+            
+            storage_condition = Condition(
+                column=where_cond.column,
+                operation=operation,
+                operand=where_cond.value
+            )
+            storage_conditions.append(storage_condition)
+        
+        return storage_conditions
+    
+    def _convert_to_storage_type(self, column_type: str):
+        """Convert string column type to StorageManager type"""
+        column_type = column_type.upper()
+        
+        if column_type == 'INT' or column_type == 'INTEGER':
+            return IntType()
+        elif column_type.startswith('VARCHAR'):
+            # Extract length from VARCHAR(n)
+            if '(' in column_type and ')' in column_type:
+                length_str = column_type[column_type.find('(')+1:column_type.find(')')]
+                try:
+                    length = int(length_str)
+                    return VarCharType(length)
+                except ValueError:
+                    return VarCharType(255)  # Default length
+            else:
+                return VarCharType(255)  # Default length
+        elif column_type == 'FLOAT' or column_type == 'DOUBLE' or column_type == 'DECIMAL':
+            return FloatType()
+        else:
+            return VarCharType(255)
     
     def _convert_where_to_dict(self, where_condition) -> Dict[str, Any]:
         return {
