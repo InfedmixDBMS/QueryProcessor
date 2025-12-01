@@ -471,7 +471,7 @@ class ExecutionVisitor(QueryPlanVisitor):
             for column_name, column_type in plan.schema.items():
                 schema_columns[column_name] = self._convert_to_storage_type(column_type)
             
-            schema = Schema(columns=schema_columns)
+            schema = Schema(**schema_columns)
             
             success = self.storage_manager.create_table(
                 plan.table_name,
