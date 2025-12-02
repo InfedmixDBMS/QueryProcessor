@@ -95,19 +95,42 @@ class ExecutionVisitor(QueryPlanVisitor):
             return True
 
         if result.status == "WAITING":
-
-            while True:
-                time.sleep(result.wait_time)
-                result = self.concurrency_manager.request_lock(
-                    self.current_transaction,
-                    resource_id,
-                    lock_type
-                )
-                if result.granted:
-                    return True
-                if result.status != "WAITING":
-                    print('Breaking wait loop')
-                    break
+            wait_event = getattr(result, 'wait_event', None)
+            
+            if wait_event is not None:
+                max_retries = 10
+                for retry_count in range(max_retries):
+                    #wait for event to be signaled (with timeout)
+                    signaled = wait_event.wait(timeout=5.0)
+                    
+                    if signaled or retry_count > 0:
+                        result = self.concurrency_manager.request_lock(
+                            self.current_transaction,
+                            resource_id,
+                            lock_type
+                        )
+                        if result.granted:
+                            return True
+                        if result.status != "WAITING":
+                            break
+                        #update event for next iteration
+                        wait_event = getattr(result, 'wait_event', None)
+                        if wait_event is None:
+                            break
+            else:
+                #fallback ke polling buat protokol yang nggak ada event
+                while True:
+                    time.sleep(result.wait_time)
+                    result = self.concurrency_manager.request_lock(
+                        self.current_transaction,
+                        resource_id,
+                        lock_type
+                    )
+                    if result.granted:
+                        return True
+                    if result.status != "WAITING":
+                        print('Breaking wait loop')
+                        break
             
         elif result.status == "FAILED":
             raise RuntimeError(f"Lock denied for {resource_id}: {result.status}")
