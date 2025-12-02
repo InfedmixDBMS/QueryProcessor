@@ -21,6 +21,7 @@ class ComparisonOperator(Enum):
         mapping = {
             "=": cls.EQUALS,
             "!=": cls.NOT_EQUALS,
+            "<>": cls.NOT_EQUALS,
             ">": cls.GREATER_THAN,
             "<": cls.LESS_THAN,
             ">=": cls.GREATER_EQUAL,

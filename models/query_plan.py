@@ -348,9 +348,10 @@ class CreateTablePlan(QueryPlan):
 
 class DropTablePlan(QueryPlan):
     
-    def __init__(self, table_name: str):
+    def __init__(self, table_name: str, if_exists: bool = False):
         super().__init__()
         self.table_name = table_name
+        self.if_exists = if_exists
     
     def accept(self, visitor: 'QueryPlanVisitor') -> Any:
         """Delegate to visitor's visit_drop_table method."""

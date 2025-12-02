@@ -174,6 +174,11 @@ class ExecutionVisitor(QueryPlanVisitor):
             for row in child_rows.data:
                 row_dict = {col: val for col, val in zip(child_rows.columns, row)}
                 
+                for col, val in zip(child_rows.columns, row):
+                    if '.' not in col:
+                        for letter in 'abcdefghijklmnopqrstuvwxyz':
+                            row_dict[f"{letter}.{col}"] = val
+                
                 if node.condition.evaluate(row_dict):
                     filtered_data.append(row)
             
@@ -225,11 +230,19 @@ class ExecutionVisitor(QueryPlanVisitor):
         
         sort_indices = []
         for clause in node.order_by:
-            try:
+            idx = None
+            if clause.column in child_rows.columns:
                 idx = child_rows.columns.index(clause.column)
-                sort_indices.append((idx, clause.direction))
-            except ValueError:
+            else:
+                if '.' in clause.column:
+                    col_without_prefix = clause.column.split('.')[-1]
+                    if col_without_prefix in child_rows.columns:
+                        idx = child_rows.columns.index(col_without_prefix)
+            
+            if idx is None:
                 raise ValueError(f"ORDER BY column not found: {clause.column}")
+            
+            sort_indices.append((idx, clause.direction))
         
         def sort_key(row):
             keys = []
@@ -407,7 +420,12 @@ class ExecutionVisitor(QueryPlanVisitor):
                     new_row_dict = {}
                     for col in all_columns:
                         if col in plan.set_clause:
-                            new_row_dict[col] = plan.set_clause[col]
+                            value = plan.set_clause[col]
+                            if hasattr(value, 'column_name'):
+                                value = old_row_dict.get(value.column_name, value)
+                            elif isinstance(value, str) and any(op in value for op in ['*', '/', '+', '-']):
+                                value = self._evaluate_expression(value, old_row_dict)
+                            new_row_dict[col] = value
                         elif col in old_row_dict:
                             new_row_dict[col] = old_row_dict[col]
                         else:
@@ -571,17 +589,35 @@ class ExecutionVisitor(QueryPlanVisitor):
         start_time = datetime.now()
         
         try:
+            if plan.if_exists:
+                try:
+                    self.storage_manager.load_schema_names(plan.table_name)
+                    table_exists = True
+                except:
+                    table_exists = False
+                
+                if not table_exists:
+                    execution_time = (datetime.now() - start_time).total_seconds()
+                    return ExecutionResult(
+                        success=True,
+                        message=f"Table '{plan.table_name}' does not exist (IF EXISTS)",
+                        execution_time=execution_time,
+                        transaction_id=self.current_transaction,
+                        query=f"DROP TABLE IF EXISTS {plan.table_name}"
+                    )
+            
             success = self.storage_manager.drop_table(plan.table_name)
             
             execution_time = (datetime.now() - start_time).total_seconds()
             
+            if_exists_str = " IF EXISTS" if plan.if_exists else ""
             if success:
                 return ExecutionResult(
                     success=True,
                     message=f"Table '{plan.table_name}' dropped successfully",
                     execution_time=execution_time,
                     transaction_id=self.current_transaction,
-                    query=f"DROP TABLE {plan.table_name}"
+                    query=f"DROP TABLE{if_exists_str} {plan.table_name}"
                 )
             else:
                 return ExecutionResult(
@@ -650,3 +686,20 @@ class ExecutionVisitor(QueryPlanVisitor):
         return {
             where_condition.column: where_condition.value
         }
+    
+    def _evaluate_expression(self, expression: str, row_dict: Dict[str, Any]):
+        import re
+        
+        result_expr = expression
+        for col_name, col_value in row_dict.items():
+            pattern = r'\b' + re.escape(col_name) + r'\b'
+            if col_value is not None:
+                result_expr = re.sub(pattern, str(col_value), result_expr)
+        
+        try:
+            result = eval(result_expr, {"__builtins__": {}}, {})
+            if isinstance(result, float) and result.is_integer():
+                return int(result)
+            return result
+        except Exception as e:
+            raise ValueError(f"Failed to evaluate expression '{expression}': {str(e)}")
