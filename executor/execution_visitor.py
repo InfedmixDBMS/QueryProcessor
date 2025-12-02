@@ -85,26 +85,34 @@ class ExecutionVisitor(QueryPlanVisitor):
         if not self.concurrency_manager or self.current_transaction is None:
             return True
 
-        max_retries = 10
-        retry_count = 0
+        result = self.concurrency_manager.request_lock(
+            self.current_transaction,
+            resource_id,
+            lock_type
+        )
 
-        while retry_count < max_retries:
-            result = self.concurrency_manager.request_lock(
-                self.current_transaction,
-                resource_id,
-                lock_type
-            )
+        if result.granted:
+            return True
 
-            if result.granted:
-                return True
+        if result.status == "WAITING":
 
-            if result.status == "WAITING":
+            while True:
                 time.sleep(result.wait_time)
-                retry_count += 1
-            elif result.status == "FAILED":
-                raise RuntimeError(f"Lock denied for {resource_id}: {result.status}")
-            else:
-                return False
+                result = self.concurrency_manager.request_lock(
+                    self.current_transaction,
+                    resource_id,
+                    lock_type
+                )
+                if result.granted:
+                    return True
+                if result.status != "WAITING":
+                    print('Breaking wait loop')
+                    break
+            
+        elif result.status == "FAILED":
+            raise RuntimeError(f"Lock denied for {resource_id}: {result.status}")
+        else:
+            return False
         
         raise RuntimeError(f"Timeout waiting for lock on {resource_id}")
 
@@ -311,80 +319,72 @@ class ExecutionVisitor(QueryPlanVisitor):
     
     def visit_update(self, plan: UpdatePlan) -> ExecutionResult:
         start_time = datetime.now()
-        
         try:
             self._request_lock_with_wait(plan.table_name, "WRITE")
-            
             storage_conditions = []
             if plan.where:
                 storage_conditions = self._convert_where_to_storage_conditions([plan.where])
-            
-            if self.failure_recovery_manager and self.current_transaction:
-                data_retrieval = DataRetrieval(
-                    table=plan.table_name,
-                    column=[],
-                    conditions=storage_conditions
-                )
-                old_rows = self.storage_manager.read_block(data_retrieval)
-                
-                if old_rows and old_rows.data:
-                    all_columns = self.storage_manager.load_schema_names(plan.table_name)
-                    all_columns = [col for col in all_columns if col != '__row_id'] 
 
-                    updated_rows = []
-                    for old_row in old_rows.data:
-                        old_row_dict = dict(zip(old_rows.columns, old_row))
-            
-                        new_row_dict = {}
-                        for col in all_columns:
-                            if col in plan.set_clause:
-                                new_row_dict[col] = plan.set_clause[col]
-                            elif col in old_row_dict:
-                                new_row_dict[col] = old_row_dict[col]
-                            else:
-                                new_row_dict[col] = None
-                        
-                        new_row_values = [new_row_dict[col] for col in all_columns]
-                        updated_rows.append(new_row_values)
-                        
-                        if self.failure_recovery_manager and self.current_transaction:
-                            if '__row_id' in old_row_dict:
-                                row_id = old_row_dict['__row_id']
-                            else:
-                                row_id = old_row[0]  
-                            
-                            log_exec_result = ExecutionResult(
-                                success=True,
-                                transaction_id=self.current_transaction,
-                                query=f"UPDATE {plan.table_name}"
-                            )
-                            
-                            self.failure_recovery_manager.write_log(
-                                log_exec_result, 
-                                table=plan.table_name, 
-                                key=row_id, 
-                                old_value=old_row_dict, 
-                                new_value=plan.set_clause
-                            )
-            
-            data_deletion = DataDeletion(
+            all_columns = self.storage_manager.load_schema_names(plan.table_name)
+            all_columns = [col for col in all_columns if col != '__row_id']
+
+            updated_rows = []
+            affected_rows = 0
+
+            data_retrieval = DataRetrieval(
                 table=plan.table_name,
+                column=[],
                 conditions=storage_conditions
             )
-            deleted_count = self.storage_manager.delete_block(data_deletion)
-            
-            data_write = DataWrite(
-                table=plan.table_name,
-                column=all_columns,  
-                conditions=[],
-                new_value=updated_rows  
-            )
-            
-            affected_rows = self.storage_manager.write_block(data_write)
-            # TOLONG REVIEW INI, APAKAH SETELAHNYA PERLU delete_block?
-            
+            old_rows = self.storage_manager.read_block(data_retrieval)
+
+            if old_rows and old_rows.data:
+                for old_row in old_rows.data:
+                    old_row_dict = dict(zip(old_rows.columns, old_row))
+                    new_row_dict = {}
+                    for col in all_columns:
+                        if col in plan.set_clause:
+                            new_row_dict[col] = plan.set_clause[col]
+                        elif col in old_row_dict:
+                            new_row_dict[col] = old_row_dict[col]
+                        else:
+                            new_row_dict[col] = None
+                    new_row_values = [new_row_dict[col] for col in all_columns]
+                    updated_rows.append(new_row_values)
+                    affected_rows += 1
+
+                    if self.failure_recovery_manager and self.current_transaction:
+                        if '__row_id' in old_row_dict:
+                            row_id = old_row_dict['__row_id']
+                        else:
+                            row_id = old_row[0]
+                        log_exec_result = ExecutionResult(
+                            success=True,
+                            transaction_id=self.current_transaction,
+                            query=f"UPDATE {plan.table_name}"
+                        )
+                        self.failure_recovery_manager.write_log(
+                            log_exec_result,
+                            table=plan.table_name,
+                            key=row_id,
+                            old_value=old_row_dict,
+                            new_value=plan.set_clause
+                        )
+
+                data_deletion = DataDeletion(
+                    table=plan.table_name,
+                    conditions=storage_conditions
+                )
+                self.storage_manager.delete_block(data_deletion)
+                data_write = DataWrite(
+                    table=plan.table_name,
+                    column=all_columns,
+                    conditions=[],
+                    new_value=updated_rows
+                )
+                self.storage_manager.write_block(data_write)
+
             execution_time = (datetime.now() - start_time).total_seconds()
-            
             where_desc = f" WHERE {plan.where}" if plan.where else ""
             return ExecutionResult(
                 success=True,
@@ -394,7 +394,6 @@ class ExecutionVisitor(QueryPlanVisitor):
                 transaction_id=self.current_transaction,
                 query=f"UPDATE {plan.table_name} SET ..."
             )
-            
         except Exception as e:
             execution_time = (datetime.now() - start_time).total_seconds()
             return ExecutionResult(

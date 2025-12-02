@@ -6,6 +6,8 @@ class LockResult:
     granted: bool
     status: str  # 'GRANTED', 'WAITING', 'FAILED'
     wait_time: float = 0.5    # Suggested wait time in seconds
+    blocked_by: list = None 
+    active_transactions: list = None
 
 class AbstractConcurrencyControlManager(ABC):
     

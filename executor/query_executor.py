@@ -68,7 +68,7 @@ class QueryExecutor:
             if self.concurrency_manager:
                 transaction_id = self.concurrency_manager.begin_transaction()
                 self.current_transaction = transaction_id
-                print(f"Transaction {transaction_id} started")
+                # print(f"Transaction {transaction_id} started")
             
             result = self.execute(plan, Transaction(transaction_id))
             
