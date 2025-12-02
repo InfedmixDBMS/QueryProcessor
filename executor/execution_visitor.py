@@ -241,19 +241,60 @@ class ExecutionVisitor(QueryPlanVisitor):
         result_columns = left_rows.columns + right_rows.columns
         result_data = []
         
+        left_alias = self._get_table_name(node.left_child)
+        right_alias = self._get_table_name(node.right_child)
+        left_actual_table = self._get_actual_table_name(node.left_child)
+        right_actual_table = self._get_actual_table_name(node.right_child)
+        
         for left_row in left_rows.data:
             for right_row in right_rows.data:
                 combined_dict = {}
+                
+                # Add left table columns
                 for col, val in zip(left_rows.columns, left_row):
                     combined_dict[col] = val
+                    if left_alias:
+                        combined_dict[f"{left_alias}.{col}"] = val
+                    if left_actual_table and left_actual_table != left_alias:
+                        combined_dict[f"{left_actual_table}.{col}"] = val
+                
+                # Add right table columns
                 for col, val in zip(right_rows.columns, right_row):
                     combined_dict[col] = val
+                    if right_alias:
+                        combined_dict[f"{right_alias}.{col}"] = val
+                    if right_actual_table and right_actual_table != right_alias:
+                        combined_dict[f"{right_actual_table}.{col}"] = val
                 
-                if node.join_condition.condition.evaluate(combined_dict):
+                
+                if node.join_condition is None:
+                    # CROSS JOIN
+                    combined_row = list(left_row) + list(right_row)
+                    result_data.append(combined_row)
+                elif node.join_condition.condition.evaluate(combined_dict):
+                    # INNER JOIN
                     combined_row = list(left_row) + list(right_row)
                     result_data.append(combined_row)
         
         return Rows(result_columns, result_data)
+    
+    def _get_table_name(self, node):
+        if isinstance(node, TableScanNode):
+            return node.alias if node.alias else node.table_name
+        elif hasattr(node, 'left_child'):
+            return self._get_table_name(node.left_child)
+        elif hasattr(node, 'child'):
+            return self._get_table_name(node.child)
+        return None
+    
+    def _get_actual_table_name(self, node):
+        if isinstance(node, TableScanNode):
+            return node.table_name
+        elif hasattr(node, 'left_child'):
+            return self._get_actual_table_name(node.left_child)
+        elif hasattr(node, 'child'):
+            return self._get_actual_table_name(node.child)
+        return None
     
     
     def visit_insert(self, plan: InsertPlan) -> ExecutionResult:
@@ -273,7 +314,6 @@ class ExecutionVisitor(QueryPlanVisitor):
             if self.failure_recovery_manager and self.current_transaction:
                 predicted_row_id = self.storage_manager.get_next_row_id(plan.table_name)
                 
-                #new_value_dict = dict(zip(columns, plan.values))
                 
                 log_exec_result = ExecutionResult(
                     success=True,
