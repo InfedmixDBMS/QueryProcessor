@@ -61,50 +61,6 @@ class QueryExecutor:
                 message=f"Query execution failed: {str(e)}"
             )
     
-    def execute_with_transaction(self, plan: QueryPlan) -> ExecutionResult:
-        transaction_id: Optional[int] = None
-        
-        try:
-            if self.concurrency_manager:
-                transaction_id = self.concurrency_manager.begin_transaction()
-                self.current_transaction = transaction_id
-                # print(f"Transaction {transaction_id} started")
-            
-            result = self.execute(plan, Transaction(transaction_id))
-            
-            if not result.success:
-                raise Exception(result.error)
-            
-            if self.concurrency_manager and transaction_id:
-                success = self._flush_to_storage(result)
-                
-                if success:
-                    self.concurrency_manager.commit_transaction(transaction_id)
-                    self.concurrency_manager.commit_flushed(transaction_id)
-                    self.concurrency_manager.end_transaction(transaction_id)
-                    print(f"Transaction {transaction_id} committed successfully")
-                else:
-                    raise Exception("Failed to flush to storage")
-            
-            self.current_transaction = None
-            return result
-            
-        except Exception as e:
-            if self.concurrency_manager and transaction_id:
-                print(f"Rolling back transaction {transaction_id}")
-                self.concurrency_manager.rollback_transaction(transaction_id)
-                self.concurrency_manager.end_transaction(transaction_id)
-            
-            self.current_transaction = None
-            return ExecutionResult(
-                success=False,
-                error=str(e),
-                message=f"Transaction failed: {str(e)}"
-            )
-    
-    def _acquire_locks(self, plan: QueryPlan, lock_type: str) -> bool:
-        return True
-    
     def _extract_tables(self, plan: QueryPlan) -> list:
         
         tables = []
@@ -121,8 +77,3 @@ class QueryExecutor:
             tables.extend(self._extract_tables(plan.right_child))
         
         return list(set(tables))
-    
-    def _flush_to_storage(self, result: ExecutionResult) -> bool:
-        """Flush result ke storage (untuk write operations)"""
-        # TODO: Implement flush logic
-        return True
