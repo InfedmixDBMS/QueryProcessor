@@ -119,15 +119,23 @@ class QueryProcessor:
             try:
                 transaction.commit()
                 
-                # Commit di Concurrency Manager
-                if not self.concurrency_manager.commit_transaction(transaction_id):
+
+                commit_success = self.concurrency_manager.commit_transaction(transaction_id)
+                
+                if not commit_success:
+                    # Commit failed
+                    transaction.abort()
+                    self.concurrency_manager.rollback_transaction(transaction_id)
+                    self.concurrency_manager.end_transaction(transaction_id)
+                    self.recovery_manager.log_transaction_abort(transaction_id)
+                    
+                    del self.active_transactions[transaction_id]
+                    
                     return ExecutionResult(
                         success=False,
-                        error=f"Failed to commit transaction {transaction_id} in concurrency manager"
+                        error=f"Transaction {transaction_id} aborted due to validation failure or protocol conflict. Please start a new transaction and retry.",
+                        message="Commit failed - transaction has been rolled back"
                     )
-                
-                self.concurrency_manager.commit_flushed(transaction_id)
-                self.concurrency_manager.end_transaction(transaction_id)
                 
                 # Log commit
                 self.recovery_manager.log_transaction_commit(transaction_id)

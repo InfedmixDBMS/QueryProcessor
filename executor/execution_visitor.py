@@ -98,12 +98,11 @@ class ExecutionVisitor(QueryPlanVisitor):
             wait_event = getattr(result, 'wait_event', None)
             
             if wait_event is not None:
-                max_retries = 10
+                max_retries = 100  
                 for retry_count in range(max_retries):
-                    #wait for event to be signaled (with timeout)
                     signaled = wait_event.wait(timeout=5.0)
                     
-                    if signaled or retry_count > 0:
+                    if signaled:
                         result = self.concurrency_manager.request_lock(
                             self.current_transaction,
                             resource_id,
@@ -113,13 +112,12 @@ class ExecutionVisitor(QueryPlanVisitor):
                             return True
                         if result.status != "WAITING":
                             break
-                        #update event for next iteration
                         wait_event = getattr(result, 'wait_event', None)
                         if wait_event is None:
                             break
             else:
-                #fallback ke polling buat protokol yang nggak ada event
-                while True:
+                max_polls = 100
+                for poll_count in range(max_polls):
                     time.sleep(result.wait_time)
                     result = self.concurrency_manager.request_lock(
                         self.current_transaction,
@@ -129,15 +127,18 @@ class ExecutionVisitor(QueryPlanVisitor):
                     if result.granted:
                         return True
                     if result.status != "WAITING":
-                        print('Breaking wait loop')
                         break
             
         elif result.status == "FAILED":
-            raise RuntimeError(f"Lock denied for {resource_id}: {result.status}")
+            raise RuntimeError(
+                f"Transaction aborted due to concurrency protocol conflict on {resource_id}. "
+                f"Transaction must be restarted with a new BEGIN statement."
+            )
         else:
             return False
         
         raise RuntimeError(f"Timeout waiting for lock on {resource_id}")
+
 
     def visit_table_scan(self, node: TableScanNode) -> Rows:
         self._request_lock_with_wait(node.table_name, "READ")
@@ -547,6 +548,9 @@ class ExecutionVisitor(QueryPlanVisitor):
         start_time = datetime.now()
         
         try:
+            # Request WRITE lock for CREATE TABLE (DDL operation)
+            self._request_lock_with_wait(plan.table_name, "WRITE")
+            
             schema_columns = {}
             for column_name, column_type in plan.schema.items():
                 schema_columns[column_name] = self._convert_to_storage_type(column_type)
@@ -593,7 +597,7 @@ class ExecutionVisitor(QueryPlanVisitor):
                 try:
                     self.storage_manager.load_schema_names(plan.table_name)
                     table_exists = True
-                except:
+                except Exception:
                     table_exists = False
                 
                 if not table_exists:
@@ -605,6 +609,9 @@ class ExecutionVisitor(QueryPlanVisitor):
                         transaction_id=self.current_transaction,
                         query=f"DROP TABLE IF EXISTS {plan.table_name}"
                     )
+            
+            # Request WRITE lock for DROP TABLE (DDL operation)
+            self._request_lock_with_wait(plan.table_name, "WRITE")
             
             success = self.storage_manager.drop_table(plan.table_name)
             
