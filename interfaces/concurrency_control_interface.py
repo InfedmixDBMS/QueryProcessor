@@ -8,6 +8,7 @@ class LockResult:
     wait_time: float = 0.5    # Suggested wait time in seconds
     blocked_by: list = None 
     active_transactions: list = None
+    message: str = ""
 
 class AbstractConcurrencyControlManager(ABC):
     

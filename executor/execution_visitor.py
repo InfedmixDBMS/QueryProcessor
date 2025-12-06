@@ -130,8 +130,9 @@ class ExecutionVisitor(QueryPlanVisitor):
                         break
             
         elif result.status == "FAILED":
+            failure_reason = getattr(result, 'message', 'concurrency protocol conflict')
             raise RuntimeError(
-                f"Transaction aborted due to concurrency protocol conflict on {resource_id}. "
+                f"Transaction aborted: {failure_reason} on {resource_id}. "
                 f"Transaction must be restarted with a new BEGIN statement."
             )
         else:
